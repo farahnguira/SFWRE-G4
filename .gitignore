@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+
+# Virtualenv
+venv/
+env/
+.env/
+
+# Data files
+*.csv
+*.tsv
+*.json
+*.xlsx
+
+# Docker
+Dockerfile
+.docker/
+docker-compose.yml
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# System files (macOS, Windows, Linux)
+.DS_Store  # macOS system files
+Thumbs.db   # Windows system files
