@@ -3,7 +3,7 @@ from dp_scheduler import dp_knapsack  # or whatever your function is named
 
 import os, csv, sys
 
-def load_first_n_items(filename, n=50):
+def load_first_n_items(filename, n=5):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     print(f" script_dir = {script_dir}")
     print(" contains:", os.listdir(script_dir))
@@ -22,7 +22,7 @@ def load_first_n_items(filename, n=50):
     return items
 
 if __name__ == "__main__":
-    items = load_first_n_items("cleaned_data.csv", n=5)
+    items = load_first_n_items("cleaned_data.csv", n=50)
     capacity = 50
 
     weights = [item["weight"] for item in items]
@@ -34,3 +34,5 @@ if __name__ == "__main__":
     
     print("Selected item IDs:", selected_indices)
     print("Total priority:    ", total_value)
+    print("Total weight:      ", sum(weights[i] for i in selected_indices))
+    print("Total items:      ", len(selected_indices))
