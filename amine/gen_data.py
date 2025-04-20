@@ -1,45 +1,50 @@
-import csv
-import random
+import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 
-# Configuration
-num_items = 545
-unique_date_count = 90
-# make sure this range ≥ unique_date_count
-max_days_range = 365  
+# Set random seed for reproducibility
+np.random.seed(42)
 
-base_date = datetime.today()
-categories = ["vegetables", "dairy", "canned", "bakery", "meat", "dry"]
-max_priority = 10
+# Define parameters
+num_items = 500  # Reduced number of items to increase likelihood of zero days
+start_date = datetime(2025, 10, 1)
+end_date = datetime(2026, 4, 30)
+num_days = (end_date - start_date).days + 1
+food_types = ["vegetables", "dairy", "canned", "bakery", "meat", "dry goods"]
 
-# 1) Pick 90 different day‑offsets
-unique_offsets = random.sample(range(1, max_days_range + 1), unique_date_count)
-# 2) Turn them into formatted dates
-unique_dates = [
-    (base_date + timedelta(days=d)).strftime("%Y-%m-%d")
-    for d in unique_offsets
-]
+# Generate dates
+dates = [start_date + timedelta(days=x) for x in range(num_days)]
 
-# 3) Build your full list of 545 expiry dates:
-#    — start with the 90 unique ones (so each appears at least once)
-#    — then sample the remaining 455 from those 90 (with replacement)
-expiry_dates = unique_dates.copy()
-expiry_dates += random.choices(unique_dates, k=num_items - unique_date_count)
-
-# 4) Shuffle so the “singles” and “duplicates” are randomly interspersed
-random.shuffle(expiry_dates)
-
-# 5) Now generate the CSV, pulling expiry_dates[i] for each row
-with open("raw_data.csv", "w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["item_id", "type", "expiry_date", "quantity", "priority"])
+# Generate data
+data = []
+for _ in range(num_items):
+    # Randomly select an expiry date
+    expiry_date = np.random.choice(dates)
     
-    for item_id in range(1, num_items + 1):
-        food_type = random.choices(categories, weights=[30,20,15,10,5,10])[0]
-        expiry = expiry_dates[item_id - 1]
-        quantity = random.randint(1, 20)
-        # priority inversely proportional to days until expiry:
-        days_to_expiry = (datetime.strptime(expiry, "%Y-%m-%d") - base_date).days
-        priority = max(1, max_priority - days_to_expiry)
-        
-        writer.writerow([item_id, food_type, expiry, quantity, priority])
+    # Donation date should be before expiry date (between 1 and 30 days prior)
+    days_before_expiry = np.random.randint(1, 31)
+    donation_date = expiry_date - timedelta(days=days_before_expiry)
+    
+    # Ensure donation date is not before the start date
+    if donation_date < start_date:
+        donation_date = start_date
+    
+    food_type = np.random.choice(food_types)
+    # Increase chance of zero quantity
+    quantity = 0 if np.random.random() < 0.3 else np.random.randint(1, 21)  # 30% chance of quantity 0
+    priority = np.random.randint(1, 6)  # Priority between 1 and 5
+    
+    data.append({
+        "donation_date": donation_date,
+        "expiry_date": expiry_date,
+        "type": food_type,
+        "quantity": quantity,
+        "priority": priority
+    })
+
+# Create DataFrame
+df = pd.DataFrame(data)
+
+# Save to CSV
+df.to_csv("amine/data/raw_data.csv", index=False)
+print("Generated raw_data.csv with donation_date column and increased zero quantities.")

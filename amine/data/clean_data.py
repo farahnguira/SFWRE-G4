@@ -1,66 +1,43 @@
-import os
 import pandas as pd
+import logging
 
-# 1. Paths
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-RAW_PATH     = os.path.join(BASE_DIR, "raw_data.csv")
-CLEANED_PATH = os.path.join(BASE_DIR, "cleaned_data.csv")
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# 2. Load raw data, parsing dates
-df = pd.read_csv(RAW_PATH, parse_dates=["expiry_date"])
+def clean_data(input_path="amine/data/raw_data.csv", output_path="amine/data/cleaned_data.csv"):
+    """Clean the raw data and save to cleaned_data.csv."""
+    try:
+        # Load the raw data
+        df = pd.read_csv(input_path, parse_dates=["donation_date", "expiry_date"])
+        
+        # Remove duplicates
+        df = df.drop_duplicates()
+        
+        # Handle missing values
+        df = df.dropna(subset=["donation_date", "expiry_date", "type", "quantity", "priority"])
+        
+        # Ensure data types
+        df["quantity"] = df["quantity"].astype(int)
+        df["priority"] = df["priority"].astype(int)
+        df["type"] = df["type"].astype(str)
+        
+        # Remove invalid quantities
+        df = df[df["quantity"] >= 0]
+        
+        # Ensure donation_date is before expiry_date
+        df = df[df["donation_date"] <= df["expiry_date"]]
+        
+        # Sort by expiry_date
+        df = df.sort_values("expiry_date")
+        
+        # Save to CSV
+        df.to_csv(output_path, index=False)
+        logger.info(f"Cleaned data saved to {output_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to clean data: {e}")
+        raise
 
-# 1. No nulls in any critical column
-for col in ["item_id", "type", "expiry_date", "quantity", "priority"]:
-    assert df[col].notnull().all(), f"Nulls found in '{col}'"
-
-# 2. expiry_date really is datetime
-assert pd.api.types.is_datetime64_any_dtype(df["expiry_date"]), \
-        "expiry_date column is not datetime"
-
-# 3. (Optional) No expiry dates in the past
-today = pd.Timestamp.today().normalize()
-assert (df["expiry_date"] >= today).all(), "Some expiry_date values are before today"
-
-print(" All data checks passed.")
-# 3. Define your type normalization map
-synonym_map = {
-    "veg":        "vegetables",
-    "vegetable":  "vegetables",
-    "vegetables": "vegetables",
-    "dairy":      "dairy",
-    "dairy food": "dairy",
-    "canned":     "canned",
-    "canned food":"canned",
-    "bakery":     "bakery",
-    "bakery food":"bakery",
-    "meat":       "meat",
-    "meat food":  "meat",
-    "dry":        "dry goods",
-    "dry goods":  "dry goods"
-}
-
-# 4. Normalize the 'type' column
-df["type"] = (
-    df["type"]
-      .str.lower()
-      .str.strip()
-      .map(synonym_map)
-      .fillna(df["type"])    # leave anything unexpected unchanged
-)
-
-# 5. Drop exact duplicates
-df = df.drop_duplicates()
-
-# 6. Data quality checks
-assert df["item_id"].notnull().all(),      "Null values in item_id"
-assert df["type"].notnull().all(),         "Null values in type"
-assert df["expiry_date"].notnull().all(),  "Null values in expiry_date"
-assert pd.api.types.is_datetime64_any_dtype(df["expiry_date"]), "expiry_date not datetime"
-today = pd.Timestamp.today().normalize()
-assert (df["expiry_date"] >= today).all(), "Some expiry_date values are before today"
-assert df["quantity"].notnull().all(),     "Null values in quantity"
-assert df["priority"].notnull().all(),     "Null values in priority"
-
-# 7. Save the cleaned CSV
-df.to_csv(CLEANED_PATH, index=False)
-print(f"Cleaned data saved to {CLEANED_PATH}")
+if __name__ == "__main__":
+    clean_data()
