@@ -21,7 +21,7 @@ assert pd.api.types.is_datetime64_any_dtype(df["expiry_date"]), \
 today = pd.Timestamp.today().normalize()
 assert (df["expiry_date"] >= today).all(), "Some expiry_date values are before today"
 
-print("✅ All data checks passed.")
+print(" All data checks passed.")
 # 3. Define your type normalization map
 synonym_map = {
     "veg":        "vegetables",

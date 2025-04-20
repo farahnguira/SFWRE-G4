@@ -3,7 +3,7 @@ import random
 from datetime import datetime, timedelta
 
 # Configuration
-num_items = 200
+num_items = 545
 base_date = datetime.today()
 categories = ["vegetables", "dairy", "canned", "bakery", "meat", "dry"]
 max_priority = 10
