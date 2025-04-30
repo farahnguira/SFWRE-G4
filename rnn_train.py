@@ -1,4 +1,4 @@
-import os # Make sure os is imported
+import os
 import logging
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
@@ -6,123 +6,90 @@ from sklearn.metrics import classification_report
 import numpy as np
 import pandas as pd
 import pickle
-from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
-from ui.dash_app.use_data import load_cleaned_data, aggregate_daily, prepare_scaled_data, prepare_classification_data, add_temporal_features
-
+# Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Import preprocessing functions
+from ui.dash_app.use_data import load_cleaned_data, aggregate_daily, prepare_scaled_data, prepare_classification_data
+
 def add_priority_feature(daily, original_df):
-    # ... (function definition as before) ...
+    """Add the priority feature to the daily DataFrame for classification."""
     try:
-        # Ensure donation_date is datetime in original_df
-        original_df['donation_date'] = pd.to_datetime(original_df['donation_date'], errors='coerce')
-
-        # Group by donation_date and location
-        priority_by_date = original_df.groupby([original_df['donation_date'].dt.date,
-                                              'location'])['priority'].mean().reset_index()
-        priority_by_date['donation_date'] = pd.to_datetime(priority_by_date['donation_date'])
-
-        # Log column types and shapes
-        logger.info(f"daily dtypes: {daily.dtypes}")
-        logger.info(f"priority_by_date dtypes: {priority_by_date.dtypes}")
-        logger.info(f"daily shape before merge: {daily.shape}")
-        logger.info(f"priority_by_date shape: {priority_by_date.shape}")
-
-        # Merge on donation_date and location
+        priority_by_date = original_df.groupby(original_df['expiry_date'].dt.date)['priority'].mean().reset_index()
         daily = daily.merge(
             priority_by_date,
-            left_on=['donation_date', 'location'],
-            right_on=['donation_date', 'location'],
+            left_on=daily['expiry_date'].dt.date,
+            right_on='expiry_date',
             how='left'
         )
-
-        # Log shape after merge
-        logger.info(f"daily shape after merge: {daily.shape}")
-
-        # Check if priority column exists
-        if 'priority' not in daily.columns:
-            logger.warning("Priority column not added after merge. Creating default priority column.")
-            daily['priority'] = 1.0  # Default priority value
-        else:
-            # Fill NaNs in priority
-            daily['priority'] = daily['priority'].fillna(daily['priority'].mean())
-            if daily['priority'].isnull().all():
-                logger.warning("All priority values are NaN. Setting default priority to 1.0.")
-                daily['priority'] = 1.0
-
+        daily['priority'] = daily['priority'].fillna(daily['priority'].mean())
         logger.info("Priority feature added successfully.")
-        logger.info(f"daily columns after merge: {daily.columns.tolist()}")
         return daily
     except Exception as e:
         logger.error(f"Failed to add priority feature: {e}")
         raise
 
-# --- Add the train_classifier function definition ---
 def train_classifier(X_train, y_train, X_val, y_val):
     """Train a RandomForestClassifier for zero/non-zero prediction."""
     try:
-        # Reshape data for RandomForestClassifier (needs 2D input)
-        # Combine the window steps and features dimensions
-        n_samples_train, window_size, n_features = X_train.shape
-        X_train_reshaped = X_train.reshape((n_samples_train, window_size * n_features))
-
-        n_samples_val, _, _ = X_val.shape
-        X_val_reshaped = X_val.reshape((n_samples_val, window_size * n_features))
-
+        # Log class distribution
         logger.info(f"Training set class distribution: {np.bincount(y_train.astype(int))}")
         logger.info(f"Validation set class distribution: {np.bincount(y_val.astype(int))}")
-
-        # Initialize and train the classifier
-        # Use class_weight='balanced' to handle potential imbalance
-        clf = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced', n_jobs=-1)
-        clf.fit(X_train_reshaped, y_train)
-
-        # Evaluate on validation set
-        y_pred_val = clf.predict(X_val_reshaped)
-        logger.info("Classification Report:\n" + classification_report(y_val, y_pred_val, zero_division=0))
-
-        return clf
+        
+        # Check if both classes are present in training data
+        if len(np.unique(y_train)) < 2:
+            logger.warning("Training data contains only one class. Using a default classifier that predicts all non-zero.")
+            # Create a dummy classifier that always predicts 1 (non-zero)
+            class DummyClassifier:
+                def fit(self, X, y):
+                    return self
+                def predict(self, X):
+                    return np.ones(X.shape[0], dtype=int)
+                def predict_proba(self, X):
+                    # Return 0 probability for class 0, 1 for class 1
+                    return np.column_stack((np.zeros(X.shape[0]), np.ones(X.shape[0])))
+            classifier = DummyClassifier()
+            classifier.fit(X_train.reshape(X_train.shape[0], -1), y_train)
+            y_pred = classifier.predict(X_val.reshape(X_val.shape[0], -1))
+            logger.info("Classification Report (dummy classifier):\n" + classification_report(y_val, y_pred))
+        else:
+            classifier = RandomForestClassifier(n_estimators=100, class_weight={0: 1, 1: 3}, random_state=42)
+            classifier.fit(X_train.reshape(X_train.shape[0], -1), y_train)
+            y_pred = classifier.predict(X_val.reshape(X_val.shape[0], -1))
+            logger.info("Classification Report:\n" + classification_report(y_val, y_pred))
+        return classifier
     except Exception as e:
-        logger.error(f"Failed during classifier training: {e}")
+        logger.error(f"Failed to train classifier: {e}")
         raise
-# --- End of train_classifier function definition ---
 
-# --- Define build_lstm_model (ensure it's defined) ---
 def build_lstm_model(input_shape):
     """Build an LSTM model for quantity prediction."""
     model = Sequential([
         LSTM(128, input_shape=input_shape, return_sequences=True),
-        Dropout(0.3),
-        LSTM(64, return_sequences=True),
-        Dropout(0.3),
-        LSTM(32),
-        Dropout(0.3),
-        Dense(32, activation='relu'),
+        Dropout(0.4),
+        LSTM(64),
+        Dropout(0.4),
         Dense(16, activation='relu'),
         Dense(1)
     ])
     model.compile(optimizer="adam", loss="mse", metrics=["mae"])
     return model
-# --- End of build_lstm_model definition ---
 
-# --- Define train_lstm_model (ensure it's defined) ---
 def train_lstm_model(X_train, y_train, X_val, y_val, food_type):
     """Train an LSTM model for a specific food type."""
     try:
         model = build_lstm_model((X_train.shape[1], X_train.shape[2]))
-
-        checkpoint_filepath = f"models/demand_model_{food_type}.keras"
         checkpoint = ModelCheckpoint(
-            filepath=checkpoint_filepath,
+            filepath=f"models/demand_model_{food_type}.h5",
             monitor="val_loss",
             save_best_only=True,
             verbose=1
         )
-
         early_stopping = EarlyStopping(
             monitor='val_loss',
             patience=10,
@@ -144,16 +111,10 @@ def train_lstm_model(X_train, y_train, X_val, y_val, food_type):
             callbacks=[checkpoint, early_stopping, reduce_lr],
             verbose=1
         )
-
-        logger.info(f"Loading best model from {checkpoint_filepath}")
-        best_model = load_model(checkpoint_filepath)
-
-        return best_model, history
+        return model, history
     except Exception as e:
         logger.error(f"Failed to train LSTM model for {food_type}: {e}")
         raise
-# --- End of train_lstm_model definition ---
-
 
 def main():
     """Main function to train the classifier and LSTM models."""
@@ -161,88 +122,50 @@ def main():
         # Load and prepare data
         logger.info("Loading and preparing data...")
         df = load_cleaned_data(path="amine/data/cleaned_data.csv")
+        if 'donation_date' not in df.columns:
+            logger.warning("donation_date column not found in cleaned_data.csv. Skipping days_until_expiry feature.")
         daily = aggregate_daily(df, by_type=False)
         daily_by_type = aggregate_daily(df, by_type=True)
 
         # Add priority feature for classification
-        logger.info("Adding priority feature...")
-        daily = add_priority_feature(daily, df) # Ensure this function runs correctly
+        daily = add_priority_feature(daily, df)
 
-        # --- Start: Classifier Training Logic ---
-        logger.info("Preparing classification data...")
-        window_clf = 7
-        X_clf, y_clf, _ = prepare_classification_data(daily, window=window_clf, original_df=df) # Unpack 3, ignore dates
-
-        if y_clf.size == 0:
-            logger.error("prepare_classification_data returned empty y_clf. Cannot proceed.")
-            raise ValueError("Cannot train classifier with empty data.")
-
-        logger.info(f"y_clf class distribution before split: {np.bincount(y_clf.astype(int))}")
-
-        stratify_param = y_clf if len(np.unique(y_clf)) >= 2 else None
-        if len(X_clf) < 5:
-             logger.error(f"Not enough samples ({len(X_clf)}) for classifier train/test split.")
-             raise ValueError("Insufficient samples for classifier train/test split.")
-
-        logger.info("Splitting data for classifier...")
-        X_train_clf, X_val_clf, y_train_clf, y_val_clf = train_test_split(
-            X_clf, y_clf, test_size=0.2, shuffle=True, stratify=stratify_param, random_state=42
-        )
-
+        # Train classifier for zero/non-zero prediction
         logger.info("Training classifier...")
-        # Now this call should work
+        X_clf, y_clf = prepare_classification_data(daily, window=7, original_df=df)
+        # Log y_clf distribution
+        logger.info(f"y_clf class distribution: {np.bincount(y_clf.astype(int))}")
+        X_train_clf, X_val_clf, y_train_clf, y_val_clf = train_test_split(
+            X_clf, y_clf, test_size=0.2, shuffle=True, stratify=y_clf, random_state=42
+        )
         classifier = train_classifier(X_train_clf, y_train_clf, X_val_clf, y_val_clf)
 
-        # Save the newly trained classifier
+        # Save the classifier
         os.makedirs("models", exist_ok=True)
         with open('models/classifier.pkl', 'wb') as f:
             pickle.dump(classifier, f)
-        logger.info("Classifier trained and saved to models/classifier.pkl")
-        # --- End: Classifier Training Logic ---
+        logger.info("Classifier saved to models/classifier.pkl")
 
-        # --- Start: LSTM Training Logic ---
-        # ... (rest of the main function as before) ...
+        # Train LSTM models per food type
         logger.info("Preparing data for LSTM models...")
-        window_lstm = 7
-        X_dict, y_dict, scaler_dict, _ = prepare_scaled_data(daily_by_type, window=window_lstm, by_type=True, original_df=df) # Unpack 4, ignore dates
+        X_dict, y_dict, scaler_dict = prepare_scaled_data(daily_by_type, window=7, by_type=True, original_df=df)
         types = list(X_dict.keys())
 
         for t in types:
             logger.info(f"Training LSTM model for food type: {t}")
-            if t not in X_dict or t not in y_dict or t not in scaler_dict:
-                 logger.warning(f"Skipping type {t} due to missing data in dictionaries.")
-                 continue
-            if X_dict[t] is None or X_dict[t].shape[0] == 0:
-                logger.warning(f"Skipping type {t} due to insufficient data for LSTM.")
-                continue
-
             X, y, scaler = X_dict[t], y_dict[t], scaler_dict[t]
-
-            if scaler is None:
-                 logger.warning(f"Skipping type {t} due to missing scaler.")
-                 continue
-
-            if len(X) < 5:
-                logger.warning(f"Skipping type {t}: Insufficient samples ({len(X)}) for LSTM train/test split.")
-                continue
-
-            logger.info(f"Splitting LSTM data for type: {t}")
             X_train, X_val, y_train, y_val = train_test_split(
                 X, y, test_size=0.2, shuffle=False
             )
-
-            if X_train.shape[0] == 0 or X_val.shape[0] == 0:
-                 logger.warning(f"Skipping type {t}: Train or validation set empty after split.")
-                 continue
-
             model, history = train_lstm_model(X_train, y_train, X_val, y_val, t)
 
+            # Save the model and scaler
+            model.save(f"models/demand_model_{t}.h5")
             with open(f'models/scaler_{t}.pkl', 'wb') as f:
                 pickle.dump(scaler, f)
-            logger.info(f"Best model for {t} saved by checkpoint; scaler saved.")
-        # --- End: LSTM Training Logic ---
+            logger.info(f"Model and scaler for {t} saved.")
 
-        logger.info("Training complete.")
+        logger.info("Training complete; all models saved in models/ directory")
 
     except Exception as e:
         logger.error(f"Training pipeline failed: {e}")

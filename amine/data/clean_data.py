@@ -15,13 +15,12 @@ def clean_data(input_path="amine/data/raw_data.csv", output_path="amine/data/cle
         df = df.drop_duplicates()
         
         # Handle missing values
-        df = df.dropna(subset=["donation_date", "expiry_date", "type", "quantity", "priority", "location"])
+        df = df.dropna(subset=["donation_date", "expiry_date", "type", "quantity", "priority"])
         
         # Ensure data types
-        df["quantity"] = df["quantity"].astype(float)  # Keep as float for precision
-        df["priority"] = df["priority"].astype(float)
+        df["quantity"] = df["quantity"].astype(int)
+        df["priority"] = df["priority"].astype(int)
         df["type"] = df["type"].astype(str)
-        df["location"] = df["location"].astype(str)
         
         # Remove invalid quantities
         df = df[df["quantity"] >= 0]
@@ -29,8 +28,8 @@ def clean_data(input_path="amine/data/raw_data.csv", output_path="amine/data/cle
         # Ensure donation_date is before expiry_date
         df = df[df["donation_date"] <= df["expiry_date"]]
         
-        # Sort by donation_date and location
-        df = df.sort_values(["donation_date", "location"])
+        # Sort by expiry_date
+        df = df.sort_values("expiry_date")
         
         # Save to CSV
         df.to_csv(output_path, index=False)
