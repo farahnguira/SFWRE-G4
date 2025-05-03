@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 # Configuration
 num_items = 545
-unique_date_count = 90
+unique_date_count = 90  
 # make sure this range ≥ unique_date_count
 max_days_range = 365  
 
