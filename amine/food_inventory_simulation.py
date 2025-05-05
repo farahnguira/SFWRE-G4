@@ -5,26 +5,40 @@ import joblib
 import sys
 from datetime import datetime, timedelta
 
+# Try to import matplotlib; provide instructions if not installed
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    print("Error: matplotlib package is not installed.")
+    print("Please install it using the following command:")
+    print("pip install matplotlib")
+    print("\nAfter installation, run this script again.")
+    sys.exit(1)
+
 # Add the data directory to the Python path to import dp_scheduler
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(script_dir, "data")
 sys.path.append(data_dir)
 
-# Import dp_knapsack from dp_scheduler instead of redefining it
+# Import dp_knapsack from dp_scheduler
 from dp_scheduler import dp_knapsack
 
 # Simulation
-def run_simulation(data_path, model_path, timesteps=30, capacity=50):
+def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="urban", output_dir="data/outputs"):
     """
-    Simulate food inventory management, calling dp_knapsack at each timestep with priorities
-    calculated using the Random Forest model.
+    Simulate food redistribution using DP scheduler for allocation.
     
     Args:
         data_path (str): Path to cleaned_data.csv.
         model_path (str): Path to expiry_predictor_model.joblib.
         timesteps (int): Number of days to simulate.
         capacity (int): Maximum total quantity to process per timestep.
+        scenario (str): 'urban', 'spike', or 'disaster'.
+        output_dir (str): Directory for output CSVs and plots.
     """
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
     # Load data
     try:
         df = pd.read_csv(data_path)
@@ -39,6 +53,12 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=50):
     if missing_cols:
         print(f"❌ Error: Missing required columns in CSV: {missing_cols}")
         exit()
+    
+    # Print dataset stats
+    print("Food type distribution:\n", df['type'].value_counts().to_string())
+    print("Shelf life stats by type:\n", df.groupby('type').agg({'shelf_life_days': ['mean', 'min', 'max']}).to_string())
+    print("Quantity stats:\n", df['quantity'].describe().to_string())
+    print("Priority stats by type:\n", df.groupby('type').agg({'priority': ['mean', 'min', 'max']}).to_string())
     
     # Load Random Forest model
     try:
@@ -63,9 +83,16 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=50):
     inventory['remaining_shelf_life'] = inventory['shelf_life_days']
     total_waste = 0
     total_sold = 0
+    total_priority = 0
     original_df = df.copy()  # For restocking
     
-    print(f"\nStarting simulation for {timesteps} days...")
+    # Track metrics
+    waste_history = []
+    sold_history = []
+    priority_history = []
+    allocated_items = []
+    
+    print(f"\nStarting {scenario} simulation for {timesteps} days (capacity={capacity})...")
     
     # Simulate over timesteps
     for day in range(timesteps):
@@ -86,13 +113,30 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=50):
             inventory = inventory[inventory['remaining_shelf_life'] > 0]
         
         # Restock every 7 days
+        restock_volume = 100
         if day % 7 == 0 and day > 0:
-            restock = original_df.sample(n=min(100, len(original_df)), random_state=day)
+            restock_weights = original_df['shelf_life_days'] / original_df['shelf_life_days'].sum()
+            restock = original_df[original_df['type'].isin(['canned', 'dry goods', 'vegetables', 'dairy'])].sample(
+                n=min(restock_volume, len(original_df)), random_state=day, replace=True, weights=restock_weights
+            )
             restock['remaining_shelf_life'] = restock['shelf_life_days']
             inventory = pd.concat([inventory, restock]).reset_index(drop=True)
-            print(f"Restocked {len(restock)} items")
+            print(f"Restocked {len(restock)} items: {restock['type'].value_counts().to_string()}")
         
-        # Calculate adjusted priorities using model (if available)
+        # Simulate scenarios
+        if scenario == "spike" and day in [6, 7, 13, 14]:  # Weekend spike
+            restock_weights = original_df['shelf_life_days'] / original_df['shelf_life_days'].sum()
+            spike = original_df.sample(
+                n=restock_volume * 2, random_state=day, replace=True, weights=restock_weights
+            )
+            spike['remaining_shelf_life'] = spike['shelf_life_days']
+            inventory = pd.concat([inventory, spike]).reset_index(drop=True)
+            print(f"Weekend spike: Added {len(spike)} items: {spike['type'].value_counts().to_string()}")
+        
+        if scenario == "disaster" and 19 <= day <= 24:  # Disaster increased demand
+            print("Disaster scenario: Increased demand simulated (no inventory impact).")
+        
+        # Calculate adjusted priorities
         if model is not None:
             X = pd.get_dummies(inventory['type'], prefix='food_type')
             for col in feature_cols:
@@ -101,12 +145,20 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=50):
             X[['temperature', 'humidity']] = inventory[['temperature', 'humidity']]
             X = X[feature_cols]
             predicted_shelf_life = np.maximum(model.predict(X), 1)
-            # Adjust priority
+            
+            # Create DataFrame separately to avoid f-string nesting issues
+            sample_df = pd.DataFrame({
+                'type': inventory['type'][:5],
+                'predicted': predicted_shelf_life[:5].round(2),
+                'actual': inventory['shelf_life_days'][:5]
+            })
+            print(f"Sample predicted vs. actual shelf life:\n{sample_df.to_string(index=False)}")
+            
             inventory['adjusted_priority'] = inventory.apply(
                 lambda row: (
-                    row['priority'] * 0.1 if row['type'] in ['canned', 'dry goods']
-                    else row['priority'] * (1 / max(1, row['remaining_shelf_life'])) * (
-                        1 / max(min_shelf_life.get(row['type'], 1), predicted_shelf_life[inventory.index.get_loc(row.name)])
+                    row['priority'] * 0.5 if row['type'] in ['canned', 'dry goods']
+                    else row['priority'] * (1 / max(1, row['remaining_shelf_life']) ** 1.5) * (
+                        1 / max(min_shelf_life.get(row['type'], 1), predicted_shelf_life[inventory.index.get_loc(row.name)]) ** 1.5
                     )
                 ),
                 axis=1
@@ -114,41 +166,123 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=50):
         else:
             inventory['adjusted_priority'] = inventory['priority']
         
-        # Prepare inputs for dp_knapsack
+        # Use DP scheduler
         weights = inventory['quantity'].astype(int).tolist()
         values = inventory['adjusted_priority'].astype(float).tolist()
-        
-        # Call DP scheduler
         _, selected_idx = dp_knapsack(weights, values, capacity)
         
+        # Process selected items
         if selected_idx:
-            selected_items = inventory.iloc[selected_idx]
-            total_sold += selected_items['quantity'].sum()
+            selected_items = inventory.iloc[selected_idx].copy()  # Create an explicit copy to avoid SettingWithCopyWarning
+            day_sold = selected_items['quantity'].sum()
+            day_priority = selected_items['adjusted_priority'].sum()
+            total_sold += day_sold
+            total_priority += day_priority
             print(f"Processed {len(selected_items)} items: {selected_items['type'].tolist()}")
             print(f"Details:\n{selected_items[['item_id', 'type', 'quantity', 'adjusted_priority', 'remaining_shelf_life']].to_string(index=False)}")
-            print(f"Total sold: {total_sold} units")
+            print(f"Day priority: {day_priority:.2f} (Total: {total_priority:.2f})")
+            
+            # Log allocated items - add day column to the copied DataFrame
+            selected_items['day'] = day + 1
+            allocated_items.append(selected_items[['day', 'item_id', 'type', 'quantity', 'adjusted_priority']])
             
             # Remove processed items - use boolean mask approach to avoid index errors
-            mask = np.ones(len(inventory), dtype=bool)  # Create a boolean mask of True values
-            mask[selected_idx] = False  # Set positions in selected_idx to False
+            mask = np.ones(len(inventory), dtype=bool)
+            mask[selected_idx] = False
             inventory = inventory.loc[mask].reset_index(drop=True)
         else:
             print("No items selected for processing.")
+        
+        # Update metrics
+        waste_history.append(total_waste)
+        sold_history.append(total_sold)
+        priority_history.append(total_priority)
         
         # Simulate environmental changes
         if len(inventory) > 0:
             inventory['temperature'] += np.random.uniform(-0.5, 0.5, len(inventory))
             inventory['temperature'] = inventory['temperature'].clip(0, 25)
     
+    # Calculate waste reduction percentage
+    initial_units = df['quantity'].sum() + restock_volume * 4  # Initial + restocks
+    waste_percentage = (total_waste / initial_units) * 100
+    waste_reduction = 100 - waste_percentage
+    
     print(f"\nSimulation complete.")
     print(f"Final inventory: {len(inventory)} items")
     print(f"Total sold: {total_sold} units")
     print(f"Total waste: {total_waste} units")
+    print(f"Waste percentage: {waste_percentage:.2f}%")
+    print(f"Waste reduction: {waste_reduction:.2f}%")
+    print(f"Total priority: {total_priority:.2f}")
+    
+    # Save allocated items CSV
+    if allocated_items:
+        allocated_df = pd.concat(allocated_items, ignore_index=True)
+        allocated_df.to_csv(os.path.join(output_dir, f"allocated_items_{scenario}_cap{capacity}.csv"), index=False)
+        print(f"Allocated items saved to {output_dir}/allocated_items_{scenario}_cap{capacity}.csv")
+    
+    # Save priority history CSV
+    priority_df = pd.DataFrame({
+        'day': range(1, timesteps + 1),
+        'total_priority': priority_history
+    })
+    priority_df.to_csv(os.path.join(output_dir, f"priority_history_{scenario}_cap{capacity}.csv"), index=False)
+    print(f"Priority history saved to {output_dir}/priority_history_{scenario}_cap{capacity}.csv")
+    
+    # Visualization
+    plt.figure(figsize=(10, 6))
+    plt.subplot(2, 1, 1)
+    plt.plot(range(timesteps), waste_history, label='Total Waste')
+    plt.title(f'Waste Over Time ({scenario}, Capacity={capacity})')
+    plt.xlabel('Day')
+    plt.ylabel('Units')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.subplot(2, 1, 2)
+    plt.plot(range(timesteps), sold_history, label='Total Sold', color='green')
+    plt.title(f'Sales Over Time ({scenario}, Capacity={capacity})')
+    plt.xlabel('Day')
+    plt.ylabel('Units')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f"metrics_{scenario}_cap{capacity}.png"))
+    plt.close()
+    print(f"Metrics plot saved to {output_dir}/metrics_{scenario}_cap{capacity}.png")
+    
+    return total_sold, total_waste, total_priority, waste_reduction
 
 # Main execution
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(script_dir, "data", "cleaned_data.csv")
     model_path = os.path.join(script_dir, "data", "expiry_predictor_model.joblib")
+    output_dir = os.path.join(script_dir, "data", "outputs")
     
-    run_simulation(data_path, model_path, timesteps=30, capacity=50)
+    # Run simulations for all capacities and scenarios
+    capacities = [50, 100, 200]
+    scenarios = ["urban", "spike", "disaster"]
+    results = []
+    
+    for scenario in scenarios:
+        for capacity in capacities:
+            print(f"\n=== Running {scenario} scenario with capacity {capacity} ===")
+            total_sold, total_waste, total_priority, waste_reduction = run_simulation(
+                data_path, model_path, timesteps=30, capacity=capacity, scenario=scenario, output_dir=output_dir
+            )
+            results.append({
+                'scenario': scenario,
+                'capacity': capacity,
+                'total_sold': total_sold,
+                'total_waste': total_waste,
+                'total_priority': total_priority,
+                'waste_reduction': waste_reduction  
+            })
+    
+    # Save results summary
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(os.path.join(output_dir, "simulation_results.csv"), index=False)
+    print(f"Results summary saved to {output_dir}/simulation_results.csv")

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import os
 
 # Configuration
-num_items = 10000
+num_items = 1000
 base_date = datetime.today()
 categories = ["vegetables", "dairy", "canned", "bakery", "meat", "dry"]
 category_codes = {cat: idx + 1 for idx, cat in enumerate(categories)}
