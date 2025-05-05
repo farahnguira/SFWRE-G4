@@ -1,268 +1,398 @@
-import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-import logging # Import logging
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+import pickle
+import os
+import logging
+# Removed date import as it's no longer used
 
-logger = logging.getLogger(__name__) # Add logger if not present
+logger = logging.getLogger(__name__)
 
-def load_cleaned_data(path="amine/data/cleaned_data.csv"):
-    """Load the cleaned donation/demand CSV."""
-    # Parse dates, including donation_date if it exists
-    parse_dates = ["expiry_date"]
-    if "donation_date" in pd.read_csv(path, nrows=1).columns:
-        parse_dates.append("donation_date")
-    df = pd.read_csv(path, parse_dates=parse_dates)
-    return df
+# --- Removed add_priority_feature function ---
+# --- Removed HOLIDAYS and add_event_flags function ---
+# --- Removed add_temporal_features function ---
 
-def aggregate_daily(df, by_type=False):
-    """Aggregate quantities by expiry_date, optionally by food type."""
-    df['expiry_date'] = pd.to_datetime(df['expiry_date'])
-    
-    if by_type:
-        daily = df.groupby([df['expiry_date'].dt.date, 'type'])['quantity'].sum().reset_index()
-        daily['expiry_date'] = pd.to_datetime(daily['expiry_date'])
-        daily = daily.rename(columns={'quantity': 'total_quantity'})
-        
-        types = daily['type'].unique()
-        full_dfs = []
-        for t in types:
-            df_type = daily[daily['type'] == t].copy()
-            full_range = pd.date_range(start=df_type['expiry_date'].min(), end=df_type['expiry_date'].max(), freq='D')
-            df_type = (df_type.set_index('expiry_date')
-                       .reindex(full_range, fill_value=0)
-                       [['total_quantity']]
-                       .reset_index())
-            df_type['type'] = t
-            df_type.columns = ['expiry_date', 'total_quantity', 'type']
-            df_type['expiry_date'] = pd.to_datetime(df_type['expiry_date'])
-            full_dfs.append(df_type)
-        daily = pd.concat(full_dfs).reset_index(drop=True)
-        daily['expiry_date'] = pd.to_datetime(daily['expiry_date'])
-    else:
-        daily = df.groupby(df['expiry_date'].dt.date)['quantity'].sum().reset_index()
-        daily['expiry_date'] = pd.to_datetime(daily['expiry_date'])
-        full_range = pd.date_range(start=daily['expiry_date'].min(), end=daily['expiry_date'].max(), freq='D')
-        daily = daily.set_index('expiry_date').reindex(full_range, fill_value=0).reset_index()
-        daily.columns = ['expiry_date', 'total_quantity']
-        daily['expiry_date'] = pd.to_datetime(daily['expiry_date'])
-    
-    return daily
 
-def make_sequences(daily, window=7):
-    """Build input/output sequences for an RNN."""
-    values = daily["total_quantity"].values
-    X, y = [], []
-    for i in range(len(values) - window):
-        X.append(values[i : i + window])
-        y.append(values[i + window])
-    X = pd.DataFrame(X)
-    y = pd.Series(y, name="target")
-    return X, y
+def load_cleaned_data(path="data/demand_prediction/cleaned_demand_data.csv"):
+    """Loads the cleaned data from the specified path."""
+    try:
+        # Correct the path relative to the project root if necessary
+        # Assuming the script is run from the project root or the path is absolute
+        if not os.path.exists(path):
+            logger.error(f"Cleaned data file not found at {path}")
+            raise FileNotFoundError(f"Cleaned data file not found at {path}")
 
-def prepare_scaled_data(daily, window=7, by_type=False, original_df=None):
-    """Prepare scaled data for LSTM model with temporal features, optionally by type."""
-    if by_type:
-        types = daily['type'].unique()
-        X_dict, y_dict, scaler_dict = {}, {}, {}
-        for t in types:
-            df_type = daily[daily['type'] == t].copy()
-            X, y, scaler = _prepare_scaled_data_single(df_type, window, original_df[original_df['type'] == t] if original_df is not None else None)
-            X_dict[t] = X
-            y_dict[t] = y
-            scaler_dict[t] = scaler
-        return X_dict, y_dict, scaler_dict
-    else:
-        return _prepare_scaled_data_single(daily, window, original_df)
+        df = pd.read_csv(path)
+        logger.info(f"Data loaded successfully from {path}. Shape: {df.shape}")
 
-def _prepare_scaled_data_single(daily, window, original_df):
-    """Helper to prepare scaled data for a single food type."""
+        # Basic validation (e.g., check if essential columns exist)
+        # Removed the strict check for 'region' and 'food_type' as they might be handled differently post-cleaning
+        # essential_cols = {'timestamp', 'demand_kg'}
+        # missing_essential = essential_cols - set(df.columns)
+        # if missing_essential:
+        #     logger.error(f"Missing essential columns: {list(missing_essential)}")
+        #     raise ValueError(f"Missing essential columns: {list(missing_essential)}")
+
+        # Convert timestamp to datetime if needed (assuming it's already done or not required here)
+        # df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+        return df
+    except FileNotFoundError:
+        # Re-raise file not found to be handled by caller
+        raise
+    except Exception as e:
+        logger.error(f"Error loading cleaned data: {e}")
+        raise # Re-raise other exceptions
+
+
+def aggregate_daily(df, by_type=False, by_location=False):
+    """Aggregates demand by timestamp, optionally by type and location."""
+    try:
+        group_cols = ['timestamp'] # Group by timestamp instead of date
+        if by_location and 'region' in df.columns: # Use 'region' column
+            group_cols.append('region')
+        if by_type and 'food_type' in df.columns: # Use 'food_type' column
+            group_cols.append('food_type')
+
+        # Aggregate quantity
+        daily_agg = df.groupby(group_cols)['demand_kg'].sum().reset_index() # Use demand_kg
+
+        # Create a complete timestamp range for each group to fill missing steps
+        min_step = df['timestamp'].min()
+        max_step = df['timestamp'].max()
+        step_range = pd.RangeIndex(start=min_step, stop=max_step + 1, step=1) # Use RangeIndex for steps
+
+        # Create all combinations of steps and grouping columns
+        grouping_values = {}
+        if by_location and 'region' in df.columns:
+            locations = df['region'].dropna().unique()
+            if len(locations) > 0:
+                 grouping_values['region'] = locations
+            else:
+                 logger.warning("No valid regions found for grouping.")
+                 by_location = False
+                 if 'region' in group_cols: group_cols.remove('region')
+
+        if by_type and 'food_type' in df.columns:
+            types = df['food_type'].dropna().unique()
+            if len(types) > 0:
+                 grouping_values['food_type'] = types
+            else:
+                 logger.warning("No valid food types found for grouping.")
+                 by_type = False
+                 if 'food_type' in group_cols: group_cols.remove('food_type')
+
+
+        if not grouping_values: # Only grouping by timestamp
+            full_index_df = pd.DataFrame({'timestamp': step_range})
+        else:
+            index_tuples = [step_range] + [v for v in grouping_values.values()]
+            multi_index = pd.MultiIndex.from_product(index_tuples, names=['timestamp'] + list(grouping_values.keys()))
+            full_index_df = pd.DataFrame(index=multi_index).reset_index()
+
+
+        # Merge aggregated data with the full index
+        daily_filled = pd.merge(full_index_df, daily_agg, on=group_cols, how='left')
+
+        # Fill missing quantities with 0
+        daily_filled['demand_kg'] = daily_filled['demand_kg'].fillna(0) # Use demand_kg
+
+        # Sort by timestamp and other group columns
+        daily_filled = daily_filled.sort_values(by=group_cols).reset_index(drop=True)
+
+        logger.info(f"Data aggregated by timestamp. Grouping by: {group_cols}. Shape: {daily_filled.shape}")
+        return daily_filled
+
+    except Exception as e:
+        logger.error(f"Error during daily aggregation: {e}")
+        raise
+
+# --- Removed add_temporal_features function ---
+
+def _prepare_scaled_data_single(daily, window): # Removed original_df parameter
+    """Prepares features, scales data, and creates sequences for one group (LSTM)."""
     if daily.empty or len(daily) <= window:
         logger.warning(f"Not enough data for sequence creation. Need > {window} rows, got {len(daily)}.")
-        return np.array([]), np.array([]), None # Return empty arrays and None scaler
-
-    # Scale the target variable ('total_quantity')
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_values = scaler.fit_transform(daily[['total_quantity']]).astype(np.float32) # Scale and ensure float32
+        return np.array([]), np.array([]), None, pd.Series(dtype='int64') # Return timestamp series
 
     # --- Feature Engineering ---
-    all_features_list = [scaled_values] # Start with the scaled target
+    daily_features = daily.copy()
+    target_col = 'demand_kg' # Use demand_kg
 
-    # Add temporal features
-    daily_with_features = add_temporal_features(daily)
-    temporal_cols = ['day_of_week', 'month', 'day'] + [col for col in daily_with_features if col.startswith('dow_')]
-    temporal_features = daily_with_features[temporal_cols].values.astype(np.float32) # Already float32 from add_temporal_features
-    all_features_list.append(temporal_features)
+    # Lag Features
+    lags = [1, 2, 3, 7, 14, 28]
+    for lag in lags:
+        daily_features[f'quantity_lag_{lag}'] = daily_features[target_col].shift(lag)
 
-    # Add days until expiry if possible
-    if original_df is not None and 'donation_date' in original_df.columns and 'type' in daily.columns:
-        food_type = daily['type'].iloc[0]
-        original_df_type = original_df[original_df['type'] == food_type].copy() # Filter original_df for the current type and copy
+    # Rolling Features
+    roll_windows = [3, 7, 14, 28]
+    for rw in roll_windows:
+        daily_features[f'quantity_roll_mean_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).mean()
+        daily_features[f'quantity_roll_std_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).std()
+        daily_features[f'quantity_roll_median_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).median()
 
-        if not original_df_type.empty:
-            # Use .loc for modifications
-            original_df_type.loc[:, 'expiry_date'] = pd.to_datetime(original_df_type['expiry_date'], errors='coerce')
-            original_df_type.loc[:, 'donation_date'] = pd.to_datetime(original_df_type['donation_date'], errors='coerce')
-            original_df_type.dropna(subset=['expiry_date', 'donation_date'], inplace=True) # Drop rows where conversion failed
+    # --- Removed Temporal Features (Date-based) ---
+    # --- Removed Event/Holiday Flags (Date-based) ---
+    # --- Removed Days Until Expiry ---
+    # --- Removed Priority Features ---
 
-            if not original_df_type.empty:
-                original_df_type.loc[:, 'days_until_expiry'] = (original_df_type['expiry_date'] - original_df_type['donation_date']).dt.days
-
-                # Aggregate mean days_until_expiry by date for this type
-                days_until_expiry_by_date = original_df_type.groupby(original_df_type['expiry_date'].dt.date)['days_until_expiry'].mean().reset_index()
-                days_until_expiry_by_date = days_until_expiry_by_date.rename(columns={'expiry_date': 'date_key'})
-                days_until_expiry_by_date['date_key'] = pd.to_datetime(days_until_expiry_by_date['date_key']) # Ensure date_key is datetime for merge
-
-                # Merge onto the daily dataframe for this type
-                daily_merged = daily.merge(
-                    days_until_expiry_by_date,
-                    left_on='expiry_date', # Merge directly on expiry_date if it's the index or a column
-                    right_on='date_key',
-                    how='left'
-                )
-
-                # Fill NaNs robustly (e.g., with 0) and ensure numeric type
-                days_until_expiry_feature = daily_merged['days_until_expiry'].fillna(0).values.reshape(-1, 1).astype(np.float32)
-                all_features_list.append(days_until_expiry_feature)
-            else:
-                 logger.warning(f"No valid 'days_until_expiry' data after filtering/cleaning for type {food_type}.")
-        else:
-            logger.warning(f"Original data frame filtered for type {food_type} is empty.")
+    # Keep existing flags from the data
+    if 'is_weekend' not in daily_features.columns: daily_features['is_weekend'] = 0
+    if 'disaster_flag' not in daily_features.columns: daily_features['disaster_flag'] = 0
 
 
-    # Combine all features horizontally
-    combined_features = np.hstack(all_features_list)
+    # --- Define Feature Columns ---
+    feature_cols = [
+        # Lags
+        'quantity_lag_1', 'quantity_lag_2', 'quantity_lag_3', 'quantity_lag_7', 'quantity_lag_14', 'quantity_lag_28',
+        # Rolling Means
+        'quantity_roll_mean_3', 'quantity_roll_mean_7', 'quantity_roll_mean_14', 'quantity_roll_mean_28',
+        # Rolling Stds
+        'quantity_roll_std_3', 'quantity_roll_std_7', 'quantity_roll_std_14', 'quantity_roll_std_28',
+        # Rolling Medians
+        'quantity_roll_median_3', 'quantity_roll_median_7', 'quantity_roll_median_14', 'quantity_roll_median_28',
+        # Existing Flags
+        'is_weekend', 'disaster_flag',
+        # Timestamp itself (optional, can sometimes help)
+        'timestamp'
+    ]
 
-    # Check for NaNs before creating sequences
-    if np.isnan(combined_features).any():
-        logger.warning(f"NaNs detected in combined features before sequencing. Replacing with 0.")
-        combined_features = np.nan_to_num(combined_features) # Replace NaNs with 0
+    # --- Drop NaNs introduced by lags/rolling features ---
+    nan_check_cols = [col for col in feature_cols if 'lag' in col or 'roll' in col]
+    nan_check_cols = [col for col in nan_check_cols if col in daily_features.columns]
+    if nan_check_cols:
+        valid_index = daily_features.dropna(subset=nan_check_cols).index
+        daily_features = daily_features.loc[valid_index]
+    else:
+        logger.warning("No lag/roll columns found to check for NaNs.")
+
+
+    if daily_features.empty or len(daily_features) <= window:
+        logger.warning(f"Not enough data after adding features and dropping NaNs. Need > {window} rows, got {len(daily_features)}.")
+        return np.array([]), np.array([]), None, pd.Series(dtype='int64')
+
+    # --- Scaling (Using StandardScaler) ---
+    feature_cols = [col for col in feature_cols if col in daily_features.columns]
+    if not feature_cols:
+         logger.error("No feature columns available for scaling after processing.")
+         return np.array([]), np.array([]), None, pd.Series(dtype='int64')
+
+    # Scale target variable
+    scaler_target = StandardScaler()
+    scaled_target = scaler_target.fit_transform(daily_features[[target_col]]).astype(np.float32)
+
+    # Scale features
+    scaler_features = StandardScaler()
+    scaled_features = scaler_features.fit_transform(daily_features[feature_cols]).astype(np.float32)
+
+    # Combine scaled target and features
+    combined_scaled_data = np.hstack((scaled_target, scaled_features))
+    final_timestamps = daily_features['timestamp'] # Use timestamp
 
     # --- Create Sequences ---
     X, y = [], []
-    # Target 'y' is the scaled quantity at the *next* time step
-    target_values = combined_features[:, 0] # First column is scaled_quantity
+    sequence_timestamps = [] # Use timestamp
+    target_col_index = 0
 
-    for i in range(len(combined_features) - window):
-        X.append(combined_features[i : i + window, :]) # Sequence of features (window, num_features)
-        y.append(target_values[i + window])          # Target value at the end of the window + 1
+    for i in range(len(combined_scaled_data) - window):
+        X.append(combined_scaled_data[i : i + window, :]) # All columns (target + features)
+        y.append(combined_scaled_data[i + window, target_col_index]) # Target column
+        sequence_timestamps.append(final_timestamps.iloc[i + window])
 
-    if not X: # Handle case where no sequences could be created
+    if not X:
         logger.warning("Sequence list X is empty after processing.")
-        return np.array([]), np.array([]), scaler
+        return np.array([]), np.array([]), None, pd.Series(dtype='int64') # Return None for scaler if no data
 
-    X = np.array(X).astype(np.float32) # Ensure final array is float32
-    y = np.array(y).astype(np.float32) # Ensure final array is float32
+    X = np.array(X).astype(np.float32)
+    y = np.array(y).astype(np.float32)
+    sequence_timestamps = pd.Series(sequence_timestamps, dtype='int64') # Use timestamp
 
-    return X, y, scaler
+    return X, y, scaler_target, sequence_timestamps
 
-def prepare_classification_data(daily, window=7, original_df=None):
-    """Prepare data for binary classification (zero vs non-zero)."""
-    # Target: 1 if total_quantity > 0, else 0
-    y_binary = (daily['total_quantity'] > 0).astype(np.float32)
 
-    # --- Feature Engineering ---
-    # Start with the quantity itself (or log-transformed/scaled version if preferred)
-    base_features = daily[['total_quantity']].values.astype(np.float32)
-    all_features_list = [base_features]
+def prepare_scaled_data(daily_data, window=7, by_type=False): # Removed original_df parameter
+    """Wrapper to prepare scaled data, handling grouping."""
+    X_dict, y_dict, scaler_dict, timestamps_dict = {}, {}, {}, {} # Renamed dates_dict
 
-    # Add temporal features
-    daily_with_features = add_temporal_features(daily)
-    temporal_cols = ['day_of_week', 'month', 'day'] + [col for col in daily_with_features if col.startswith('dow_')]
-    temporal_features = daily_with_features[temporal_cols].values.astype(np.float32)
-    all_features_list.append(temporal_features)
+    group_cols = []
+    if by_type and 'food_type' in daily_data.columns:
+        group_cols.append('food_type')
+    if 'region' in daily_data.columns: # Use region
+        group_cols.append('region')
 
-    # Add priority feature (already added in main script, just need to select it)
-    if 'priority' in daily_with_features.columns:
-         priority_feature = daily_with_features[['priority']].fillna(0).values.astype(np.float32) # Fill NaNs and ensure float
-         all_features_list.append(priority_feature)
+    # --- Removed Priority Feature addition ---
 
-    # Add days until expiry if possible (similar logic as in _prepare_scaled_data_single)
-    if original_df is not None and 'donation_date' in original_df.columns:
-        original_df_copy = original_df.copy() # Work on a copy
-        # Use .loc for modifications
-        original_df_copy.loc[:, 'expiry_date'] = pd.to_datetime(original_df_copy['expiry_date'], errors='coerce')
-        original_df_copy.loc[:, 'donation_date'] = pd.to_datetime(original_df_copy['donation_date'], errors='coerce')
-        original_df_copy.dropna(subset=['expiry_date', 'donation_date'], inplace=True)
+    if not group_cols:
+        logger.info("Preparing data for overall aggregation.")
+        # Pass None for original_df as it's not needed in _prepare_scaled_data_single anymore
+        X, y, scaler, timestamps = _prepare_scaled_data_single(daily_data, window) # Removed original_df
+        if X.size > 0 and y.size > 0:
+            X_dict['all'] = X
+            y_dict['all'] = y
+            scaler_dict['all'] = scaler
+            timestamps_dict['all'] = timestamps # Contains timestamps
+        else:
+            logger.warning("No data prepared for overall aggregation.")
+    else:
+        try:
+            grouped_data = daily_data.groupby(group_cols)
+            for group_key, group_df in grouped_data:
+                logger.info(f"Preparing data for group: {group_key}")
+                # Pass None for original_df
+                X, y, scaler, timestamps = _prepare_scaled_data_single(group_df.copy(), window) # Removed original_df
+                if X.size > 0 and y.size > 0:
+                    X_dict[group_key] = X
+                    y_dict[group_key] = y
+                    scaler_dict[group_key] = scaler
+                    timestamps_dict[group_key] = timestamps # Contains timestamps
+                else:
+                     logger.warning(f"No data prepared for group: {group_key}")
+        except KeyError as e:
+             logger.error(f"Grouping failed. Column '{e}' not found in daily_data. Columns available: {daily_data.columns.tolist()}")
+             return {}, {}, {}, {}
+        except Exception as e:
+             logger.error(f"Error during grouped data preparation: {e}", exc_info=True)
+             raise
 
-        if not original_df_copy.empty:
-            original_df_copy.loc[:, 'days_until_expiry'] = (original_df_copy['expiry_date'] - original_df_copy['donation_date']).dt.days
-            days_until_expiry_by_date = original_df_copy.groupby(original_df_copy['expiry_date'].dt.date)['days_until_expiry'].mean().reset_index()
-            days_until_expiry_by_date = days_until_expiry_by_date.rename(columns={'expiry_date': 'date_key'})
-            # Ensure date_key is datetime
-            days_until_expiry_by_date['date_key'] = pd.to_datetime(days_until_expiry_by_date['date_key'])
+    return X_dict, y_dict, scaler_dict, timestamps_dict # Return timestamps_dict
 
-            # --- Add this line ---
-            # Ensure the left key ('expiry_date' in daily) is also datetime before merging
-            daily['expiry_date'] = pd.to_datetime(daily['expiry_date'], errors='coerce')
-            # --- End of addition ---
 
-            daily_merged = daily.merge(
-                days_until_expiry_by_date,
-                left_on='expiry_date', # Should now be datetime64[ns]
-                right_on='date_key',   # Is datetime64[ns]
-                how='left'
-            )
-            # Check if 'days_until_expiry_x' or similar exists and handle potential duplicate columns if needed
-            # For simplicity, assuming 'days_until_expiry' is the correct column after merge
-            days_until_expiry_feature = daily_merged['days_until_expiry'].fillna(0).values.reshape(-1, 1).astype(np.float32)
-            all_features_list.append(days_until_expiry_feature)
+def prepare_classification_data(daily, window=7): # Removed original_df parameter
+    """Prepares features and sequences for the classification model."""
+    # Target: 1 if demand_kg > 0, else 0
+    y_binary = (daily['demand_kg'] > 0).astype(np.float32) # Use demand_kg
 
-    # Combine all features horizontally
-    combined_features = np.hstack(all_features_list)
+    daily_features = daily.copy()
+    target_col = 'demand_kg' # Keep target temporarily for feature calculation
 
-    # Check for NaNs before creating sequences
-    if np.isnan(combined_features).any():
-        logger.warning(f"NaNs detected in combined features for classification. Replacing with 0.")
-        combined_features = np.nan_to_num(combined_features)
+    # --- Feature Engineering (similar to LSTM prep) ---
+    # Lag Features
+    lags = [1, 2, 3, 7, 14, 28]
+    for lag in lags:
+        daily_features[f'quantity_lag_{lag}'] = daily_features[target_col].shift(lag)
 
-    # --- Create Sequences ---
+    # Rolling Features
+    roll_windows = [3, 7, 14, 28]
+    for rw in roll_windows:
+        daily_features[f'quantity_roll_mean_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).mean()
+        daily_features[f'quantity_roll_std_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).std()
+        daily_features[f'quantity_roll_median_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).median()
+
+    # --- Removed Temporal Features (Date-based) ---
+    # --- Removed Event/Holiday Flags (Date-based) ---
+    # --- Removed Priority Features ---
+    # --- Removed Days Until Expiry ---
+
+    # Keep existing flags
+    if 'is_weekend' not in daily_features.columns: daily_features['is_weekend'] = 0
+    if 'disaster_flag' not in daily_features.columns: daily_features['disaster_flag'] = 0
+
+    # Location Dummies (if region exists)
+    if 'region' in daily_features.columns:
+        location_dummies = pd.get_dummies(daily_features['region'], prefix='loc', dummy_na=False).astype(np.float32)
+        daily_features = pd.concat([daily_features, location_dummies], axis=1)
+
+
+    # --- Define Feature Columns for Classifier ---
+    feature_cols = [
+        # Lags
+        'quantity_lag_1', 'quantity_lag_2', 'quantity_lag_3', 'quantity_lag_7', 'quantity_lag_14', 'quantity_lag_28',
+        # Rolling Means
+        'quantity_roll_mean_3', 'quantity_roll_mean_7', 'quantity_roll_mean_14', 'quantity_roll_mean_28',
+        # Rolling Stds
+        'quantity_roll_std_3', 'quantity_roll_std_7', 'quantity_roll_std_14', 'quantity_roll_std_28',
+        # Rolling Medians
+        'quantity_roll_median_3', 'quantity_roll_median_7', 'quantity_roll_median_14', 'quantity_roll_median_28',
+        # Existing Flags
+        'is_weekend', 'disaster_flag',
+        # Timestamp itself (optional)
+        'timestamp'
+    ]
+    # Add location dummies dynamically
+    feature_cols += [col for col in daily_features if col.startswith('loc_')]
+
+    # --- Drop NaNs ---
+    nan_check_cols = [col for col in feature_cols if 'lag' in col or 'roll' in col]
+    nan_check_cols = [col for col in nan_check_cols if col in daily_features.columns]
+    if nan_check_cols:
+        valid_index = daily_features.dropna(subset=nan_check_cols).index
+        daily_features = daily_features.loc[valid_index]
+        y_binary = y_binary.loc[valid_index]
+    else:
+        logger.warning("No lag/roll columns found for NaN check in classification data.")
+
+
+    if daily_features.empty:
+        logger.error("DataFrame empty after feature engineering and NaN removal in prepare_classification_data.")
+        return np.array([]), np.array([]), pd.Series(dtype='int64')
+
+    # --- Select Final Features and Timestamps ---
+    final_feature_cols = [col for col in feature_cols if col in daily_features.columns]
+    if not final_feature_cols:
+        logger.error("No valid feature columns remaining for classification model.")
+        return np.array([]), np.array([]), pd.Series(dtype='int64')
+
+    features_final = daily_features[final_feature_cols].astype(np.float32)
+    final_timestamps = daily_features['timestamp'] # Use timestamp
+
+    # --- Create Sequences for Classifier ---
     X_clf, y_clf = [], []
-    if len(combined_features) <= window:
-         logger.warning("Not enough data for classification sequence creation.")
-         return np.array([]), np.array([])
+    sequence_timestamps_clf = [] # Use timestamp
 
-    for i in range(len(combined_features) - window):
-        X_clf.append(combined_features[i : i + window])
-        y_clf.append(y_binary[i + window]) # Target is binary label at t+1
+    features_np = features_final.to_numpy()
+    y_binary_np = y_binary.to_numpy()
+
+    for i in range(len(features_np) - window):
+        X_clf.append(features_np[i : i + window, :])
+        y_clf.append(y_binary_np[i + window])
+        sequence_timestamps_clf.append(final_timestamps.iloc[i + window])
 
     if not X_clf:
         logger.warning("Sequence list X_clf is empty after processing.")
-        return np.array([]), np.array([])
+        return np.array([]), np.array([]), pd.Series(dtype='int64')
 
-    X_clf = np.array(X_clf).astype(np.float32) # Ensure float32
-    y_clf = np.array(y_clf).astype(np.float32) # Ensure float32
+    X_clf = np.array(X_clf).astype(np.float32)
+    y_clf = np.array(y_clf).astype(np.float32)
+    sequence_timestamps_clf = pd.Series(sequence_timestamps_clf, dtype='int64') # Use timestamp
 
-    return X_clf, y_clf
+    logger.info(f"Classification data prepared. X_clf shape: {X_clf.shape}, y_clf shape: {y_clf.shape}")
+    return X_clf, y_clf, sequence_timestamps_clf
 
-def add_temporal_features(daily):
-    """Add time-based features to improve predictions"""
-    df_features = daily.copy() # Work on a copy
-
-    # --- Add this check and conversion ---
-    if not pd.api.types.is_datetime64_any_dtype(df_features['expiry_date']):
-        logger.warning("expiry_date column was not datetime in add_temporal_features. Converting.")
-        df_features['expiry_date'] = pd.to_datetime(df_features['expiry_date'], errors='coerce')
-        # Handle potential errors during conversion if necessary
-        if df_features['expiry_date'].isnull().any():
-             logger.error("NaNs introduced in expiry_date during conversion in add_temporal_features. Check data.")
-             # Option: Drop rows with NaT dates, or raise an error
-             # df_features = df_features.dropna(subset=['expiry_date'])
-             # raise ValueError("Could not convert all expiry_dates to datetime")
-    # --- End of addition ---
-
-    # Now it's safe to use .dt
-    df_features['day_of_week'] = df_features['expiry_date'].dt.dayofweek
-    df_features['month'] = df_features['expiry_date'].dt.month
-    df_features['day'] = df_features['expiry_date'].dt.day
-    dow_dummies = pd.get_dummies(df_features['day_of_week'], prefix='dow', dummy_na=False).astype(np.float32) # Convert dummies to float
-    df_features = pd.concat([df_features, dow_dummies], axis=1)
-    # Ensure base temporal features are numeric
-    df_features[['day_of_week', 'month', 'day']] = df_features[['day_of_week', 'month', 'day']].astype(np.float32)
-    return df_features
-
+# Example usage (optional) - Updated
 if __name__ == "__main__":
-    df = load_cleaned_data()
-    daily = aggregate_daily(df)
-    X, y = make_sequences(daily)
-    print("Daily shape:", daily.shape)
-    print("X shape:", X.shape, "y shape:", y.shape)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger.info("Running use_data.py standalone example...")
+    try:
+        df_main = load_cleaned_data() # Loads from the new default path
+
+        daily_agg_main = aggregate_daily(df_main, by_type=True, by_location=True)
+
+        window_size = 14
+        # Pass None for original_df
+        X_d, y_d, scaler_d, timestamps_d = prepare_scaled_data(daily_agg_main, window=window_size, by_type=True) # Removed original_df
+
+        if X_d:
+            first_key = list(X_d.keys())[0]
+            logger.info(f"LSTM Data Example (Group: {first_key}):")
+            logger.info(f"  X shape: {X_d[first_key].shape}")
+            logger.info(f"  y shape: {y_d[first_key].shape}")
+            logger.info(f"  Timestamps length: {len(timestamps_d[first_key])}") # Now timestamps
+            logger.info(f"  Scaler Type: {type(scaler_d[first_key])}")
+        else:
+            logger.warning("No LSTM data generated in example.")
+
+        daily_agg_clf = aggregate_daily(df_main, by_type=False, by_location=True)
+        # Removed call to add_priority_feature
+        # Pass None for original_df
+        X_c, y_c, timestamps_c = prepare_classification_data(daily_agg_clf, window=window_size) # Removed original_df
+
+        if X_c.size > 0:
+            logger.info("Classification Data Example:")
+            logger.info(f"  X_clf shape: {X_c.shape}")
+            logger.info(f"  y_clf shape: {y_c.shape}")
+            logger.info(f"  Timestamps length: {len(timestamps_c)}") # Now timestamps
+        else:
+            logger.warning("No classification data generated in example.")
+
+    except Exception as e:
+        logger.error(f"Error in standalone example: {e}", exc_info=True)
