@@ -28,34 +28,72 @@ def dp_knapsack(weights, values, capacity):
     return dp, selected
 
 def main():
+    # Get this script's directory for path resolution
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     parser = argparse.ArgumentParser(description="DP-based knapsack scheduler")
     parser.add_argument(
         "--input",
         type=str,
-        default=os.path.join("data", "cleaned_data.csv"),
+        default=os.path.join(script_dir, "cleaned_data.csv"),
         help="Path to cleaned CSV with columns: item_id, type, expiry_date, quantity, priority"
     )
     parser.add_argument(
         "--capacity",
         type=int,
-        default=50,
+        default=5,
         help="Maximum total quantity (knapsack capacity)"
     )
     args = parser.parse_args()
 
-    # Load data
-    df = pd.read_csv(args.input)
-    weights = df["quantity"].astype(int).tolist()
-    values  = df["priority"].astype(int).tolist()
-    ids     = df["item_id"].tolist()
-
+    # Load data with better error handling
+    try:
+        df = pd.read_csv(args.input)
+        print(f"✅ Successfully loaded data from {args.input}")
+    except FileNotFoundError:
+        print(f"❌ Error: Could not find the CSV file at {args.input}")
+        print(f"Current directory: {os.getcwd()}")
+        print(f"Script directory: {script_dir}")
+        print(f"Try running the script with --input=PATH_TO_CLEANED_DATA_CSV")
+        return
+    
+    # Add validation for required columns
+    required_cols = ["item_id", "quantity", "priority"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        print(f"❌ Error: Missing required columns in CSV: {missing_cols}")
+        return
+    
+    # Validate numeric data
+    try:
+        weights = df["quantity"].astype(int).tolist()
+        values = df["priority"].astype(int).tolist()
+        ids = df["item_id"].tolist()
+    except ValueError:
+        print("❌ Error: 'quantity' and 'priority' columns must contain numeric values")
+        return
+    
+    # Handle empty data
+    if len(weights) == 0:
+        print("⚠️ Warning: No items found in the data")
+        return
+        
     # Solve
     _, selected_idx = dp_knapsack(weights, values, args.capacity)
     selected_ids = [ids[i] for i in selected_idx]
-    total_value  = sum(values[i] for i in selected_idx)
-
+    total_value = sum(values[i] for i in selected_idx)
+    total_weight = sum(weights[i] for i in selected_idx)
+    
     print("Selected item IDs:", selected_ids)
-    print("Total priority  :", total_value)
+    print("Total priority:", total_value)
+    print("Total weight:", total_weight)
+    print("Total items selected:", len(selected_ids))
+    
+    # Optional: Show selected items details
+    if selected_idx:
+        selected_df = df.iloc[selected_idx]
+        print("\nSelected items:")
+        print(selected_df[["item_id", "type", "quantity", "priority"]].to_string(index=False))
 
 if __name__ == "__main__":
     main()
