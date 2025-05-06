@@ -28,7 +28,7 @@ def dp_knapsack(weights, values, capacity):
     selected.reverse()
     return dp, selected
 
-def save_to_csv(df, selected_idx, output_dir="outputs"):
+def save_to_csv(df, selected_idx, output_dir="outputs", scenario="standard", capacity=50):
     """
     Save the selected items and summary metrics to CSV files.
     
@@ -36,18 +36,22 @@ def save_to_csv(df, selected_idx, output_dir="outputs"):
         df: The DataFrame containing all items
         selected_idx: Indices of selected items
         output_dir: Directory to save output CSV files
+        scenario: Scenario name (e.g., 'urban', 'spike', 'disaster')
+        capacity: Capacity used for this allocation
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Generate timestamp for filenames
+    # Generate timestamp for filenames - use a more file-system friendly format
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
     # Save selected items
     if selected_idx:
         selected_df = df.iloc[selected_idx].copy()
         selected_df['selection_date'] = datetime.now().strftime("%Y-%m-%d")
-        selected_path = os.path.join(output_dir, f"selected_items_{timestamp}.csv")
+        selected_df['scenario'] = scenario
+        selected_df['capacity'] = capacity
+        selected_path = os.path.join(output_dir, f"selected_items_{scenario}_cap{capacity}_{timestamp}.csv")
         selected_df.to_csv(selected_path, index=False)
         print(f"✅ Selected items saved to: {selected_path}")
         
@@ -63,18 +67,58 @@ def save_to_csv(df, selected_idx, output_dir="outputs"):
             wasted_mask = pd.to_datetime(df['expiry_date']) < today
             wasted_items = df[wasted_mask]["quantity"].sum()
         
-        # Create summary DataFrame
-        summary_df = pd.DataFrame({
+        # Food type distribution analysis (if type column exists)
+        type_distribution = {}
+        if 'type' in selected_df.columns:
+            # Group by type and sum quantities
+            type_distribution = selected_df.groupby('type')['quantity'].sum().to_dict()
+            
+        # Expiry analysis (if expiry_date exists)
+        avg_shelf_life = None
+        urgent_items = 0
+        if 'expiry_date' in selected_df.columns:
+            today = pd.Timestamp.today().normalize()
+            expiry_dates = pd.to_datetime(selected_df['expiry_date'])
+            days_until_expiry = (expiry_dates - today).dt.days
+            
+            # Average remaining shelf life in days
+            avg_shelf_life = days_until_expiry.mean()
+            
+            # Count items expiring within 3 days (urgent delivery needed)
+            urgent_items = sum(selected_df.loc[days_until_expiry <= 3, 'quantity'])
+        
+        # Create enhanced summary DataFrame
+        summary_data = {
             'date': [datetime.now().strftime("%Y-%m-%d")],
+            'timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            'scenario': [scenario],  # Use the scenario parameter
+            'algorithm': ['dp_knapsack'],
+            'capacity': [capacity],  # Add capacity to summary
             'total_items_selected': [total_items],
             'total_quantity_delivered': [total_quantity],
             'total_priority_score': [total_priority],
-            'food_wasted': [wasted_items]
-        })
+            'food_wasted': [wasted_items],
+        }
         
-        summary_path = os.path.join(output_dir, f"summary_{timestamp}.csv")
+        # Add average shelf life if available
+        if avg_shelf_life is not None:
+            summary_data['avg_remaining_shelf_life'] = [round(avg_shelf_life, 1)]
+            summary_data['urgent_delivery_items'] = [urgent_items]
+        
+        # Add type distribution if available
+        for food_type, quantity in type_distribution.items():
+            summary_data[f'quantity_{food_type}'] = [quantity]
+        
+        summary_df = pd.DataFrame(summary_data)
+        
+        summary_path = os.path.join(output_dir, f"summary_{scenario}_cap{capacity}_{timestamp}.csv")
         summary_df.to_csv(summary_path, index=False)
-        print(f"✅ Summary metrics saved to: {summary_path}")
+        print(f"✅ Enhanced summary metrics saved to: {summary_path}")
+        
+        # Return the summary for potential use by other components
+        return summary_df
+    
+    return None
 
 def main():
     # Get this script's directory for path resolution
@@ -90,7 +134,7 @@ def main():
     parser.add_argument(
         "--capacity",
         type=int,
-        default=50,
+        default=600,
         help="Maximum total quantity (knapsack capacity)"
     )
     parser.add_argument(
@@ -98,6 +142,13 @@ def main():
         type=str,
         default=os.path.join(script_dir, "outputs"),
         help="Directory to save output CSV files"
+    )
+    parser.add_argument(
+        "--scenario",
+        type=str,
+        default="standard",
+        choices=["standard", "urban", "spike", "disaster"],
+        help="Simulation scenario type"
     )
     parser.add_argument(
         "--no-export-csv",
@@ -157,7 +208,7 @@ def main():
     
     # Export to CSV by default, unless explicitly disabled
     if not args.no_export_csv:
-        save_to_csv(df, selected_idx, args.output_dir)
+        save_to_csv(df, selected_idx, args.output_dir, args.scenario, args.capacity)
 
 if __name__ == "__main__":
     main()

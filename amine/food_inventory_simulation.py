@@ -24,7 +24,7 @@ sys.path.append(data_dir)
 from dp_scheduler import dp_knapsack
 
 # Simulation
-def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="urban", output_dir="data/outputs"):
+def run_simulation(data_path, model_path, timesteps=30, capacity=600, scenario="urban", output_dir="data/outputs"):
     """
     Simulate food redistribution using DP scheduler for allocation.
     
