@@ -1,318 +1,310 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
-import pickle
-import os
+from sklearn.model_selection import train_test_split
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 def load_cleaned_data(path="data/demand_prediction/cleaned_demand_data.csv"):
     """Loads the cleaned data from the specified path."""
     try:
-        if not os.path.exists(path):
-            logger.error(f"Cleaned data file not found at {path}")
-            raise FileNotFoundError(f"Cleaned data file not found at {path}")
-
         df = pd.read_csv(path)
-        # Remove duplicates based on key columns
-        df = df.drop_duplicates(subset=['timestamp', 'recipient_id', 'region', 'food_type', 'demand_kg'], keep='first')
-        logger.info(f"Data loaded successfully from {path}. Shape after deduplication: {df.shape}")
+        logger.info(f"Data loaded successfully from {path}. Shape: {df.shape}")
+        # Ensure timestamp is treated as numeric for calculations
+        df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+        df = df.dropna(subset=['timestamp']) # Drop rows where timestamp couldn't be converted
+        df['timestamp'] = df['timestamp'].astype(int)
         return df
     except FileNotFoundError:
+        logger.error(f"Error: The file '{path}' was not found.")
         raise
     except Exception as e:
-        logger.error(f"Error loading cleaned data: {e}")
+        logger.error(f"An error occurred while loading the data: {e}")
         raise
 
 def aggregate_daily(df, by_type=False, by_location=False):
     """Aggregates demand by timestamp, optionally by type and location."""
     try:
+        if df is None or df.empty:
+            logger.warning("Input DataFrame is empty or None. Cannot aggregate.")
+            return pd.DataFrame()
+
         group_cols = ['timestamp']
-        if by_location and 'region' in df.columns:
-            group_cols.append('region')
-        if by_type and 'food_type' in df.columns:
+        if by_type:
             group_cols.append('food_type')
+        if by_location:
+            group_cols.append('region')
 
-        daily_agg = df.groupby(group_cols)['demand_kg'].sum().reset_index()
+        # Find timestamps where Region_B had a disaster_flag=1 in the original data BEFORE aggregation
+        shortage_timestamps = set(df[(df['region'] == 'Region_B') & (df['disaster_flag'] == 1)]['timestamp'].unique())
+        logger.info(f"Identified {len(shortage_timestamps)} timestamps with Region_B shortages.")
 
-        min_step = df['timestamp'].min()
-        max_step = df['timestamp'].max()
-        step_range = pd.RangeIndex(start=min_step, stop=max_step + 1, step=1)
+        # Aggregate demand
+        df_agg = df.groupby(group_cols)['demand_kg'].sum().reset_index()
 
-        grouping_values = {}
-        if by_location and 'region' in df.columns:
-            locations = df['region'].dropna().unique()
-            if len(locations) > 0:
-                grouping_values['region'] = locations
-            else:
-                logger.warning("No valid regions found for grouping.")
-                by_location = False
-                if 'region' in group_cols: group_cols.remove('region')
+        # Create the new global shortage feature in the aggregated dataframe
+        df_agg['region_b_shortage_flag'] = df_agg['timestamp'].apply(lambda ts: 1 if ts in shortage_timestamps else 0).astype(int)
 
-        if by_type and 'food_type' in df.columns:
-            types = df['food_type'].dropna().unique()
-            if len(types) > 0:
-                grouping_values['food_type'] = types
-            else:
-                logger.warning("No valid food types found for grouping.")
-                by_type = False
-                if 'food_type' in group_cols: group_cols.remove('food_type')
+        # Rename aggregated column for clarity
+        df_agg = df_agg.rename(columns={'demand_kg': 'demand_kg'}) # Keep name consistent for now
 
-        if not grouping_values:
-            full_index_df = pd.DataFrame({'timestamp': step_range})
-        else:
-            index_tuples = [step_range] + [v for v in grouping_values.values()]
-            multi_index = pd.MultiIndex.from_product(index_tuples, names=['timestamp'] + list(grouping_values.keys()))
-            full_index_df = pd.DataFrame(index=multi_index).reset_index()
+        logger.info(f"Data aggregated. Grouped by: {group_cols}. Shape: {df_agg.shape}")
+        logger.info(f"Aggregated data includes 'region_b_shortage_flag'. Sum: {df_agg['region_b_shortage_flag'].sum()}")
+        return df_agg
 
-        daily_filled = pd.merge(full_index_df, daily_agg, on=group_cols, how='left')
-        daily_filled['demand_kg'] = daily_filled['demand_kg'].fillna(0)
-        daily_filled = daily_filled.sort_values(by=group_cols).reset_index(drop=True)
-        logger.info(f"Data aggregated by timestamp. Grouping by: {group_cols}. Shape: {daily_filled.shape}")
-        return daily_filled
     except Exception as e:
-        logger.error(f"Error during daily aggregation: {e}")
-        raise
+        logger.error(f"An error occurred during daily aggregation: {e}", exc_info=True)
+        return pd.DataFrame()
+
 
 def _prepare_scaled_data_single(daily, window):
     """Prepares features, scales data, and creates sequences for one group (LSTM)."""
     if daily.empty or len(daily) <= window:
-        logger.warning(f"Not enough data for sequence creation. Need > {window} rows, got {len(daily)}.")
-        return np.array([]), np.array([]), None, pd.Series(dtype='int64')
+        logger.warning("Not enough data for scaling or sequence creation.")
+        return None, None, None, None, None # Return Nones matching the expected output tuple
 
     daily_features = daily.copy()
     target_col = 'demand_kg'
 
+    # Ensure timestamp is int for modulo operation
+    daily_features['timestamp'] = daily_features['timestamp'].astype(int)
+
     # Add temporal features
     daily_features['day_of_week'] = (daily_features['timestamp'] % 7).astype(int)  # 0 to 6
-    # Use disaster_flag as proxy for holiday in Region_A (shortage-driven spikes)
-    if 'disaster_flag' in daily_features.columns:
-        daily_features['is_holiday'] = daily_features['disaster_flag'].astype(int)
-    else:
-        daily_features['is_holiday'] = 0
-    # Add interaction feature for Region_A during shortages
-    if 'disaster_flag' in daily_features.columns and 'region' in daily_features.columns:
-        daily_features['shortage_region_interaction'] = daily_features['disaster_flag'] * (daily_features['region'] == 'Region_A').astype(int)
+    daily_features['is_weekend'] = daily_features['day_of_week'].apply(lambda x: 1 if x >= 5 else 0) # Assuming 5=Sat, 6=Sun
 
-    # Lag Features
+    # --- Removed is_holiday proxy based on disaster_flag ---
+    # Use a placeholder for actual holidays if needed, otherwise set to 0
+    daily_features['is_holiday'] = 0
+
+    # --- Removed shortage_region_interaction ---
+    # This is now handled by including 'region_b_shortage_flag' for all regions
+
+    # Lag Features - Use demand_kg directly as quantity
     lags = [1, 2, 3, 7, 14, 28]
     for lag in lags:
         daily_features[f'quantity_lag_{lag}'] = daily_features[target_col].shift(lag)
 
-    # Rolling Features
+    # Rolling Features - Use demand_kg directly as quantity
     roll_windows = [3, 7, 14, 28]
     for rw in roll_windows:
-        daily_features[f'quantity_roll_mean_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).mean()
-        daily_features[f'quantity_roll_std_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).std()
-        daily_features[f'quantity_roll_median_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).median()
+        rolling_mean = daily_features[target_col].rolling(window=rw, min_periods=1).mean()
+        rolling_std = daily_features[target_col].rolling(window=rw, min_periods=1).std()
+        rolling_median = daily_features[target_col].rolling(window=rw, min_periods=1).median()
+        daily_features[f'quantity_roll_mean_{rw}'] = rolling_mean.shift(1) # Shift to prevent data leakage
+        daily_features[f'quantity_roll_std_{rw}'] = rolling_std.shift(1)
+        daily_features[f'quantity_roll_median_{rw}'] = rolling_median.shift(1)
 
-    # Define Feature Columns
+    # Define Feature Columns - including the new global shortage flag
     feature_cols = [
         'quantity_lag_1', 'quantity_lag_2', 'quantity_lag_3', 'quantity_lag_7', 'quantity_lag_14', 'quantity_lag_28',
         'quantity_roll_mean_3', 'quantity_roll_mean_7', 'quantity_roll_mean_14', 'quantity_roll_mean_28',
         'quantity_roll_std_3', 'quantity_roll_std_7', 'quantity_roll_std_14', 'quantity_roll_std_28',
         'quantity_roll_median_3', 'quantity_roll_median_7', 'quantity_roll_median_14', 'quantity_roll_median_28',
-        'day_of_week', 'is_weekend', 'is_holiday', 'shortage_region_interaction', 'timestamp'
+        'day_of_week', 'is_weekend', 'is_holiday',
+        'region_b_shortage_flag', # Added new global flag
+        'timestamp' # Keep timestamp for potential analysis, but usually exclude from scaling/model input features
     ]
 
-    # Drop NaNs introduced by lags/rolling features
-    nan_check_cols = [col for col in feature_cols if 'lag' in col or 'roll' in col]
-    nan_check_cols = [col for col in nan_check_cols if col in daily_features.columns]
-    if nan_check_cols:
-        valid_index = daily_features.dropna(subset=nan_check_cols).index
-        daily_features = daily_features.loc[valid_index]
-    else:
-        logger.warning("No lag/roll columns found to check for NaNs.")
+    # Ensure all defined feature columns actually exist, fill NaNs created by shifts/rolls
+    existing_feature_cols = [col for col in daily_features.columns if col in feature_cols and col != 'timestamp']
+    daily_features = daily_features.fillna(0) # Simple fillna strategy, consider more sophisticated methods if needed
 
     if daily_features.empty or len(daily_features) <= window:
-        logger.warning(f"Not enough data after adding features and dropping NaNs. Need > {window} rows, got {len(daily_features)}.")
-        return np.array([]), np.array([]), None, pd.Series(dtype='int64')
+        logger.warning("Data became empty or too short after feature engineering.")
+        return None, None, None, None, None
 
     # Scaling
-    feature_cols = [col for col in feature_cols if col in daily_features.columns]
-    if not feature_cols:
-        logger.error("No feature columns available for scaling after processing.")
-        return np.array([]), np.array([]), None, pd.Series(dtype='int64')
+    if not existing_feature_cols:
+        logger.warning("No valid feature columns found for scaling.")
+        return None, None, None, None, None
+
+    scaler_features = StandardScaler()
+    # Scale only the feature columns, exclude timestamp
+    scaled_features = scaler_features.fit_transform(daily_features[existing_feature_cols]).astype(np.float32)
 
     scaler_target = StandardScaler()
     scaled_target = scaler_target.fit_transform(daily_features[[target_col]]).astype(np.float32)
 
-    scaler_features = StandardScaler()
-    scaled_features = scaler_features.fit_transform(daily_features[feature_cols]).astype(np.float32)
-
-    combined_scaled_data = np.hstack((scaled_target, scaled_features))
-    final_timestamps = daily_features['timestamp']
-
-    # Create Sequences
-    X, y = [], []
-    sequence_timestamps = []
-    target_col_index = 0
-
-    for i in range(len(combined_scaled_data) - window):
-        X.append(combined_scaled_data[i : i + window, :])
-        y.append(combined_scaled_data[i + window, target_col_index])
-        sequence_timestamps.append(final_timestamps.iloc[i + window])
+    # Create sequences
+    X, y, timestamps_seq = [], [], []
+    for i in range(window, len(scaled_features)):
+        X.append(scaled_features[i-window:i])
+        y.append(scaled_target[i])
+        timestamps_seq.append(daily_features['timestamp'].iloc[i]) # Store corresponding timestamp for the prediction
 
     if not X:
-        logger.warning("Sequence list X is empty after processing.")
-        return np.array([]), np.array([]), None, pd.Series(dtype='int64')
+        logger.warning("No sequences created.")
+        return None, None, None, None, None
 
-    X = np.array(X).astype(np.float32)
-    y = np.array(y).astype(np.float32)
-    sequence_timestamps = pd.Series(sequence_timestamps, dtype='int64')
-    return X, y, scaler_target, sequence_timestamps
+    X = np.array(X)
+    y = np.array(y)
+    timestamps_seq = np.array(timestamps_seq)
+
+    logger.info(f"Prepared scaled data. X shape: {X.shape}, y shape: {y.shape}")
+    return X, y, scaler_target, timestamps_seq, scaler_features # Return feature scaler as well
+
 
 def prepare_scaled_data(daily_data, window=14, by_type=False):
-    """Wrapper to prepare scaled data, handling grouping."""
+    """Prepares scaled data for LSTM, potentially grouped by type and region."""
     X_dict, y_dict, scaler_dict, timestamps_dict = {}, {}, {}, {}
+    scaler_features_dict = {} # Store feature scalers
+
+    if daily_data is None or daily_data.empty:
+        logger.error("Input daily_data is empty or None.")
+        return X_dict, y_dict, scaler_dict, timestamps_dict # Return empty dicts
+
     group_cols = []
     if by_type and 'food_type' in daily_data.columns:
         group_cols.append('food_type')
-    if 'region' in daily_data.columns:
+    if 'region' in daily_data.columns: # Assuming region always exists after aggregation if by_location=True
         group_cols.append('region')
 
-    if not group_cols:
-        logger.info("Preparing data for overall aggregation.")
-        X, y, scaler, timestamps = _prepare_scaled_data_single(daily_data, window)
-        if X.size > 0 and y.size > 0:
+    if group_cols:
+        grouped = daily_data.groupby(group_cols)
+        logger.info(f"Grouping data by {group_cols} for scaling.")
+        for name, group in grouped:
+            logger.info(f"Processing group: {name}")
+            X, y, scaler_target, timestamps_seq, scaler_features = _prepare_scaled_data_single(group.copy(), window)
+            if X is not None and y is not None:
+                X_dict[name] = X
+                y_dict[name] = y
+                scaler_dict[name] = scaler_target
+                timestamps_dict[name] = timestamps_seq
+                scaler_features_dict[name] = scaler_features # Store feature scaler
+            else:
+                logger.warning(f"Skipping group {name} due to insufficient data or errors.")
+    else:
+        logger.info("Processing data without grouping.")
+        X, y, scaler_target, timestamps_seq, scaler_features = _prepare_scaled_data_single(daily_data.copy(), window)
+        if X is not None and y is not None:
             X_dict['all'] = X
             y_dict['all'] = y
-            scaler_dict['all'] = scaler
-            timestamps_dict['all'] = timestamps
+            scaler_dict['all'] = scaler_target
+            timestamps_dict['all'] = timestamps_seq
+            scaler_features_dict['all'] = scaler_features # Store feature scaler
         else:
-            logger.warning("No data prepared for overall aggregation.")
-    else:
-        try:
-            grouped_data = daily_data.groupby(group_cols)
-            for group_key, group_df in grouped_data:
-                logger.info(f"Preparing data for group: {group_key}")
-                X, y, scaler, timestamps = _prepare_scaled_data_single(group_df.copy(), window)
-                if X.size > 0 and y.size > 0:
-                    X_dict[group_key] = X
-                    y_dict[group_key] = y
-                    scaler_dict[group_key] = scaler
-                    timestamps_dict[group_key] = timestamps
-                else:
-                    logger.warning(f"No data prepared for group: {group_key}")
-        except KeyError as e:
-            logger.error(f"Grouping failed. Column '{e}' not found in daily_data. Columns available: {daily_data.columns.tolist()}")
-            return {}, {}, {}, {}
-        except Exception as e:
-            logger.error(f"Error during grouped data preparation: {e}", exc_info=True)
-            raise
-    return X_dict, y_dict, scaler_dict, timestamps_dict
+            logger.warning("Skipping data processing due to insufficient data or errors.")
+
+    # Return feature scalers dictionary as well, might be useful later
+    return X_dict, y_dict, scaler_dict, timestamps_dict # scaler_features_dict could be returned if needed
+
 
 def prepare_classification_data(daily, window=14):
-    """Prepares features and sequences for the classification model."""
-    y_binary = (daily['demand_kg'] > 0).astype(np.float32)
+    """Prepares features and target for the zero-demand classification task."""
+    if daily is None or daily.empty or len(daily) <= window:
+        logger.warning("Not enough data for classification preparation.")
+        return None, None, None, None
+
     daily_features = daily.copy()
     target_col = 'demand_kg'
 
-    # Add temporal features
-    daily_features['day_of_week'] = (daily_features['timestamp'] % 7).astype(int)
-    if 'disaster_flag' in daily_features.columns:
-        daily_features['is_holiday'] = daily_features['disaster_flag'].astype(int)
-    else:
-        daily_features['is_holiday'] = 0
-    if 'disaster_flag' in daily_features.columns and 'region' in daily_features.columns:
-        daily_features['shortage_region_interaction'] = daily_features['disaster_flag'] * (daily_features['region'] == 'Region_A').astype(int)
+    # Create binary target: 1 if demand > 0, else 0
+    daily_features['is_nonzero_demand'] = (daily_features[target_col] > 0).astype(int)
+    y_class = daily_features['is_nonzero_demand'].values
 
-    # Lag Features
-    lags = [1, 2, 3, 7, 14, 28]
+    # --- Feature Engineering (Similar to LSTM, but potentially simpler) ---
+    daily_features['timestamp'] = daily_features['timestamp'].astype(int)
+    daily_features['day_of_week'] = (daily_features['timestamp'] % 7).astype(int)
+    daily_features['is_weekend'] = daily_features['day_of_week'].apply(lambda x: 1 if x >= 5 else 0)
+    # Include the global shortage flag if it exists
+    if 'region_b_shortage_flag' in daily_features.columns:
+        daily_features['region_b_shortage_flag'] = daily_features['region_b_shortage_flag']
+    else:
+        daily_features['region_b_shortage_flag'] = 0 # Default if not present
+
+    # Lag Features for the target itself (demand_kg)
+    lags = [1, 7, 14]
     for lag in lags:
         daily_features[f'quantity_lag_{lag}'] = daily_features[target_col].shift(lag)
 
-    # Rolling Features
-    roll_windows = [3, 7, 14, 28]
+    # Rolling Features for the target
+    roll_windows = [7, 14]
     for rw in roll_windows:
-        daily_features[f'quantity_roll_mean_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).mean()
-        daily_features[f'quantity_roll_std_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).std()
-        daily_features[f'quantity_roll_median_{rw}'] = daily_features[target_col].rolling(window=rw, min_periods=1).median()
+        rolling_mean = daily_features[target_col].rolling(window=rw, min_periods=1).mean()
+        daily_features[f'quantity_roll_mean_{rw}'] = rolling_mean.shift(1)
 
-    # Location Dummies
-    if 'region' in daily_features.columns:
-        location_dummies = pd.get_dummies(daily_features['region'], prefix='loc', dummy_na=False).astype(np.float32)
-        daily_features = pd.concat([daily_features, location_dummies], axis=1)
-
-    # Define Feature Columns
-    feature_cols = [
-        'quantity_lag_1', 'quantity_lag_2', 'quantity_lag_3', 'quantity_lag_7', 'quantity_lag_14', 'quantity_lag_28',
-        'quantity_roll_mean_3', 'quantity_roll_mean_7', 'quantity_roll_mean_14', 'quantity_roll_mean_28',
-        'quantity_roll_std_3', 'quantity_roll_std_7', 'quantity_roll_std_14', 'quantity_roll_std_28',
-        'quantity_roll_median_3', 'quantity_roll_median_7', 'quantity_roll_median_14', 'quantity_roll_median_28',
-        'day_of_week', 'is_weekend', 'is_holiday', 'shortage_region_interaction', 'timestamp'
+    # Define Feature Columns for Classifier
+    feature_cols_class = [
+        'quantity_lag_1', 'quantity_lag_7', 'quantity_lag_14',
+        'quantity_roll_mean_7', 'quantity_roll_mean_14',
+        'day_of_week', 'is_weekend',
+        'region_b_shortage_flag' # Include the global shortage flag
     ]
-    feature_cols += [col for col in daily_features if col.startswith('loc_')]
 
-    # Drop NaNs
-    nan_check_cols = [col for col in feature_cols if 'lag' in col or 'roll' in col]
-    nan_check_cols = [col for col in nan_check_cols if col in daily_features.columns]
-    if nan_check_cols:
-        valid_index = daily_features.dropna(subset=nan_check_cols).index
-        daily_features = daily_features.loc[valid_index]
-        y_binary = y_binary.loc[valid_index]
-    else:
-        logger.warning("No lag/roll columns found for NaN check in classification data.")
+    existing_feature_cols_class = [col for col in daily_features.columns if col in feature_cols_class]
+    daily_features = daily_features.fillna(0) # Fill NaNs
 
-    if daily_features.empty:
-        logger.error("DataFrame empty after feature engineering and NaN removal in prepare_classification_data.")
-        return np.array([]), np.array([]), pd.Series(dtype='int64')
+    if not existing_feature_cols_class:
+         logger.warning("No valid feature columns found for classification.")
+         return None, None, None, None
 
-    final_feature_cols = [col for col in feature_cols if col in daily_features.columns]
-    if not final_feature_cols:
-        logger.error("No valid feature columns remaining for classification model.")
-        return np.array([]), np.array([]), pd.Series(dtype='int64')
+    # No scaling needed for RandomForest usually, but create sequences
+    X_class_seq, y_class_seq, timestamps_class_seq = [], [], []
+    features_array = daily_features[existing_feature_cols_class].values
 
-    features_final = daily_features[final_feature_cols].astype(np.float32)
-    final_timestamps = daily_features['timestamp']
+    for i in range(window, len(features_array)):
+        # Reshape window for compatibility if needed, or flatten
+        X_class_seq.append(features_array[i-window:i].flatten()) # Flatten for RF
+        y_class_seq.append(y_class[i])
+        timestamps_class_seq.append(daily_features['timestamp'].iloc[i])
 
-    # Create Sequences
-    X_clf, y_clf = [], []
-    sequence_timestamps_clf = []
-    features_np = features_final.to_numpy()
-    y_binary_np = y_binary.to_numpy()
+    if not X_class_seq:
+        logger.warning("No sequences created for classification.")
+        return None, None, None, None
 
-    for i in range(len(features_np) - window):
-        X_clf.append(features_np[i : i + window, :])
-        y_clf.append(y_binary_np[i + window])
-        sequence_timestamps_clf.append(final_timestamps.iloc[i + window])
+    X_class_seq = np.array(X_class_seq)
+    y_class_seq = np.array(y_class_seq)
+    timestamps_class_seq = np.array(timestamps_class_seq)
 
-    if not X_clf:
-        logger.warning("Sequence list X_clf is empty after processing.")
-        return np.array([]), np.array([]), pd.Series(dtype='int64')
+    logger.info(f"Prepared classification data. X shape: {X_class_seq.shape}, y shape: {y_class_seq.shape}")
+    return X_class_seq, y_class_seq, timestamps_class_seq, existing_feature_cols_class
 
-    X_clf = np.array(X_clf).astype(np.float32)
-    y_clf = np.array(y_clf).astype(np.float32)
-    sequence_timestamps_clf = pd.Series(sequence_timestamps_clf, dtype='int64')
-    logger.info(f"Classification data prepared. X_clf shape: {X_clf.shape}, y_clf shape: {y_clf.shape}")
-    return X_clf, y_clf, sequence_timestamps_clf
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logger.info("Running use_data.py standalone example...")
+    # Example Usage (Optional: Add test code here)
+    logging.basicConfig(level=logging.INFO)
+    logger.info("Running use_data.py script example...")
     try:
-        df_main = load_cleaned_data()
-        daily_agg_main = aggregate_daily(df_main, by_type=True, by_location=True)
-        window_size = 14
-        X_d, y_d, scaler_d, timestamps_d = prepare_scaled_data(daily_agg_main, window=window_size, by_type=True)
-        if X_d:
-            first_key = list(X_d.keys())[0]
-            logger.info(f"LSTM Data Example (Group: {first_key}):")
-            logger.info(f"  X shape: {X_d[first_key].shape}")
-            logger.info(f"  y shape: {y_d[first_key].shape}")
-            logger.info(f"  Timestamps length: {len(timestamps_d[first_key])}")
-            logger.info(f"  Scaler Type: {type(scaler_d[first_key])}")
+        # Construct the path relative to the script location or use absolute path
+        script_dir = os.path.dirname(__file__) #<-- directory of the script
+        # Go up two levels from ui/dash_app to the project root SFWRE-G4
+        project_root = os.path.abspath(os.path.join(script_dir, '..', '..'))
+        data_path = os.path.join(project_root, "data", "demand_prediction", "cleaned_demand_data.csv")
+
+        df_raw = load_cleaned_data(path=data_path)
+        if df_raw is not None and not df_raw.empty:
+            daily_agg = aggregate_daily(df_raw, by_type=True, by_location=True)
+            if not daily_agg.empty:
+                logger.info("Aggregation successful. Sample:")
+                logger.info(daily_agg.head())
+                logger.info(f"Shortage flag sum in aggregated: {daily_agg['region_b_shortage_flag'].sum()}")
+
+                # Test scaling preparation
+                X_d, y_d, s_d, t_d = prepare_scaled_data(daily_agg, window=14, by_type=True)
+                if X_d:
+                    logger.info(f"Scaling preparation successful. Example group key: {list(X_d.keys())[0]}")
+                    logger.info(f"X shape for group: {list(X_d.values())[0].shape}")
+                else:
+                    logger.warning("Scaling preparation returned empty dictionaries.")
+
+                # Test classification preparation (using the first group's data for example)
+                # Note: Classification might be better done on non-grouped data depending on goal
+                first_group_key = list(daily_agg.groupby(['food_type', 'region']).groups.keys())[0]
+                first_group_df = daily_agg.groupby(['food_type', 'region']).get_group(first_group_key)
+                X_c, y_c, t_c, f_c = prepare_classification_data(first_group_df, window=14)
+                if X_c is not None:
+                     logger.info(f"Classification preparation successful for group {first_group_key}.")
+                     logger.info(f"X_class shape: {X_c.shape}")
+                else:
+                    logger.warning(f"Classification preparation failed for group {first_group_key}.")
+
+            else:
+                logger.warning("Aggregation resulted in an empty DataFrame.")
         else:
-            logger.warning("No LSTM data generated in example.")
-        daily_agg_clf = aggregate_daily(df_main, by_type=False, by_location=True)
-        X_c, y_c, timestamps_c = prepare_classification_data(daily_agg_clf, window=window_size)
-        if X_c.size > 0:
-            logger.info("Classification Data Example:")
-            logger.info(f"  X_clf shape: {X_c.shape}")
-            logger.info(f"  y_clf shape: {y_c.shape}")
-            logger.info(f"  Timestamps length: {len(timestamps_c)}")
-        else:
-            logger.warning("No classification data generated in example.")
+            logger.warning("Failed to load raw data.")
+
     except Exception as e:
-        logger.error(f"Error in standalone example: {e}", exc_info=True)
+        logger.error(f"Error in example usage: {e}", exc_info=True)
