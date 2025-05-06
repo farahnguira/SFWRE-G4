@@ -91,6 +91,7 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="
     sold_history = []
     priority_history = []
     allocated_items = []
+    actual_days_simulated = 0  # Track actual number of days simulated
     
     print(f"\nStarting {scenario} simulation for {timesteps} days (capacity={capacity})...")
     
@@ -208,6 +209,7 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="
         waste_history.append(total_waste)
         sold_history.append(total_sold)
         priority_history.append(total_priority)
+        actual_days_simulated = day + 1  # Update the actual number of days simulated
         
         # Simulate environmental changes
         if len(inventory) > 0:
@@ -233,7 +235,19 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="
         allocated_df.to_csv(os.path.join(output_dir, f"allocated_items_{scenario}_cap{capacity}.csv"), index=False)
         print(f"Allocated items saved to {output_dir}/allocated_items_{scenario}_cap{capacity}.csv")
     
-    # Save priority history CSV
+    # If the simulation ended early, pad the metrics arrays
+    if len(waste_history) < timesteps:
+        # Pad with the last value to maintain trend
+        last_waste = waste_history[-1] if waste_history else 0
+        last_sold = sold_history[-1] if sold_history else 0
+        last_priority = priority_history[-1] if priority_history else 0
+        
+        # Add padding
+        waste_history.extend([last_waste] * (timesteps - len(waste_history)))
+        sold_history.extend([last_sold] * (timesteps - len(sold_history)))
+        priority_history.extend([last_priority] * (timesteps - len(priority_history)))
+    
+    # Save priority history CSV using timesteps
     priority_df = pd.DataFrame({
         'day': range(1, timesteps + 1),
         'total_priority': priority_history
@@ -241,10 +255,10 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="
     priority_df.to_csv(os.path.join(output_dir, f"priority_history_{scenario}_cap{capacity}.csv"), index=False)
     print(f"Priority history saved to {output_dir}/priority_history_{scenario}_cap{capacity}.csv")
     
-    # Visualization
+    # Visualization using timesteps
     plt.figure(figsize=(10, 6))
     plt.subplot(2, 1, 1)
-    plt.plot(range(timesteps), waste_history, label='Total Waste')
+    plt.plot(range(1, timesteps + 1), waste_history, label='Total Waste')
     plt.title(f'Waste Over Time ({scenario}, Capacity={capacity})')
     plt.xlabel('Day')
     plt.ylabel('Units')
@@ -252,7 +266,7 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="
     plt.grid(True)
     
     plt.subplot(2, 1, 2)
-    plt.plot(range(timesteps), sold_history, label='Total Sold', color='green')
+    plt.plot(range(1, timesteps + 1), sold_history, label='Total Sold', color='green')
     plt.title(f'Sales Over Time ({scenario}, Capacity={capacity})')
     plt.xlabel('Day')
     plt.ylabel('Units')
@@ -274,7 +288,7 @@ if __name__ == "__main__":
     output_dir = os.path.join(script_dir, "data", "outputs")
     
     # Run simulations for all capacities and scenarios
-    capacities = [50, 100, 200]
+    capacities = [50, 100, 200, 400, 600]  # Added higher capacity values (400, 600)
     scenarios = ["urban", "spike", "disaster"]
     results = []
     

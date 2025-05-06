@@ -2,6 +2,7 @@
 import argparse
 import os
 import pandas as pd
+from datetime import datetime
 
 def dp_knapsack(weights, values, capacity):
     n = len(weights)
@@ -27,6 +28,54 @@ def dp_knapsack(weights, values, capacity):
     selected.reverse()
     return dp, selected
 
+def save_to_csv(df, selected_idx, output_dir="outputs"):
+    """
+    Save the selected items and summary metrics to CSV files.
+    
+    Args:
+        df: The DataFrame containing all items
+        selected_idx: Indices of selected items
+        output_dir: Directory to save output CSV files
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generate timestamp for filenames
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save selected items
+    if selected_idx:
+        selected_df = df.iloc[selected_idx].copy()
+        selected_df['selection_date'] = datetime.now().strftime("%Y-%m-%d")
+        selected_path = os.path.join(output_dir, f"selected_items_{timestamp}.csv")
+        selected_df.to_csv(selected_path, index=False)
+        print(f"✅ Selected items saved to: {selected_path}")
+        
+        # Calculate and save summary metrics
+        total_items = len(selected_idx)
+        total_quantity = selected_df["quantity"].sum()
+        total_priority = selected_df["priority"].sum()
+        
+        # Calculate wasted items (if expiry_date column exists)
+        wasted_items = 0
+        if 'expiry_date' in df.columns:
+            today = pd.Timestamp.today().normalize()
+            wasted_mask = pd.to_datetime(df['expiry_date']) < today
+            wasted_items = df[wasted_mask]["quantity"].sum()
+        
+        # Create summary DataFrame
+        summary_df = pd.DataFrame({
+            'date': [datetime.now().strftime("%Y-%m-%d")],
+            'total_items_selected': [total_items],
+            'total_quantity_delivered': [total_quantity],
+            'total_priority_score': [total_priority],
+            'food_wasted': [wasted_items]
+        })
+        
+        summary_path = os.path.join(output_dir, f"summary_{timestamp}.csv")
+        summary_df.to_csv(summary_path, index=False)
+        print(f"✅ Summary metrics saved to: {summary_path}")
+
 def main():
     # Get this script's directory for path resolution
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -41,8 +90,19 @@ def main():
     parser.add_argument(
         "--capacity",
         type=int,
-        default=5,
+        default=50,
         help="Maximum total quantity (knapsack capacity)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=os.path.join(script_dir, "outputs"),
+        help="Directory to save output CSV files"
+    )
+    parser.add_argument(
+        "--no-export-csv",
+        action="store_true",
+        help="Disable exporting results to CSV files"
     )
     args = parser.parse_args()
 
@@ -94,6 +154,10 @@ def main():
         selected_df = df.iloc[selected_idx]
         print("\nSelected items:")
         print(selected_df[["item_id", "type", "quantity", "priority"]].to_string(index=False))
+    
+    # Export to CSV by default, unless explicitly disabled
+    if not args.no_export_csv:
+        save_to_csv(df, selected_idx, args.output_dir)
 
 if __name__ == "__main__":
     main()
