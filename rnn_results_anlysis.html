@@ -1,0 +1,313 @@
+<!-- Setting up the HTML structure with required dependencies for React, Recharts, and data parsing -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demand Prediction Analysis Report</title>
+    <!-- Including Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Including required libraries for React, Babel, PapaParse, Chrono, and Recharts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+    <script src="https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chrono-node/1.3.11/chrono.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.15.0/Recharts.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .chart-container { padding: 20px; background: #f9fafb; border-radius: 8px; margin-bottom: 20px; }
+        .table-container { max-height: 400px; overflow-y: auto; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+    <!-- Defining the React application with JSX -->
+    <script type="text/babel">
+        // Initializing React root
+        const { createRoot } = ReactDOM;
+        const root = createRoot(document.getElementById('root'));
+
+        // Main App component to manage state and render the report
+        const App = () => {
+            const [predictionData, setPredictionData] = React.useState(null); // Renamed from 'data'
+            const [trainingHistoryData, setTrainingHistoryData] = React.useState(null); // New state for history
+            const [error, setError] = React.useState(null);
+            const [loading, setLoading] = React.useState(true); // New loading state
+
+            // Loading and processing CSV and JSON data
+            React.useEffect(() => {
+                const predictionsCsvPath = "data/demand_prediction/predictions_rnn_script.csv";
+                const historyJsonPath = "models/training_history.json"; // Path to your new history file
+
+                Promise.all([ // Fetch both files concurrently
+                    fetch(predictionsCsvPath).then(response => {
+                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status} while fetching ${predictionsCsvPath}`);
+                        return response.text();
+                    }).then(csvText => {
+                        return new Promise((resolve, reject) => {
+                            Papa.parse(csvText, {
+                                header: true,
+                                skipEmptyLines: true,
+                                dynamicTyping: false,
+                                transformHeader: header => header.trim().replace(/^"|"$/g, ''),
+                                transform: (value, header) => {
+                                    let cleaned = value.trim().replace(/^"|"$/g, '');
+                                    if (['timestamp', 'actual', 'predicted', 'error'].includes(header)) {
+                                        const num = Number(cleaned);
+                                        return isNaN(num) ? 0 : num;
+                                    }
+                                    if (header === 'is_nonzero_pred') return cleaned === '1';
+                                    return cleaned;
+                                },
+                                complete: (results) => {
+                                    if (results.errors.length > 0) {
+                                        console.error('CSV Parsing Errors:', results.errors);
+                                        reject('Failed to parse CSV prediction data.');
+                                        return;
+                                    }
+                                    const cleanedData = results.data.map(row => ({
+                                        timestamp: row['timestamp'],
+                                        region: row['region'],
+                                        food_type: row['food_type'],
+                                        actual: row['actual'],
+                                        predicted: row['predicted'],
+                                        error: row['error'],
+                                        is_nonzero_pred: row['is_nonzero_pred']
+                                    })).filter(row => row.region && row.food_type);
+                                    resolve(cleanedData);
+                                },
+                                error: (err) => {
+                                    console.error('PapaParse Network or File Error (Predictions):', err);
+                                    reject('Failed to load or parse CSV prediction data.');
+                                }
+                            });
+                        });
+                    }),
+                    fetch(historyJsonPath).then(response => { // Fetch training history
+                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status} while fetching ${historyJsonPath}`);
+                        return response.json();
+                    })
+                ])
+                .then(([predictions, history]) => {
+                    setPredictionData(predictions);
+                    setTrainingHistoryData(history);
+                    setLoading(false); // Set loading to false after both are fetched
+                })
+                .catch(fetchOrParseError => {
+                    console.error('Data Fetching/Parsing Error:', fetchOrParseError);
+                    setError(fetchOrParseError.message || 'Failed to load report data. Check console.');
+                    setLoading(false);
+                });
+            }, []);
+
+            if (loading) { // Updated loading state check
+                return (
+                    <div className="flex justify-center items-center h-screen">
+                        <div className="text-xl font-semibold text-gray-600">Loading Report Data...</div>
+                    </div>
+                );
+            }
+
+            if (error) {
+                return (
+                    <div className="flex justify-center items-center h-screen">
+                        <div className="text-xl font-semibold text-red-600">{error}</div>
+                    </div>
+                );
+            }
+            
+            if (!predictionData) { 
+                 return (
+                    <div className="flex justify-center items-center h-screen">
+                        <div className="text-xl font-semibold text-orange-600">Prediction data not available.</div>
+                    </div>
+                );
+            }
+
+            // Aggregating data by region for analysis
+            const regions = [...new Set(predictionData.map(row => row.region))];
+            const aggregatedData = regions.map(region => {
+                const regionData = predictionData.filter(row => row.region === region);
+                const actualSum = regionData.reduce((sum, row) => sum + row.actual, 0);
+                const predictedSum = regionData.reduce((sum, row) => sum + row.predicted, 0);
+                const errorSum = regionData.reduce((sum, row) => sum + row.error, 0);
+                const count = regionData.length;
+                const mae = errorSum / count;
+                const rmse = Math.sqrt(regionData.reduce((sum, row) => sum + Math.pow(row.error, 2), 0) / count);
+                return {
+                    region,
+                    actualSum: Math.round(actualSum),
+                    predictedSum: Math.round(predictedSum),
+                    mae: mae.toFixed(2),
+                    rmse: rmse.toFixed(2),
+                    count
+                };
+            });
+
+            // Preparing data for time-series line chart
+            const timeSeriesData = regions.map(region => {
+                const regionData = predictionData.filter(row => row.region === region);
+                const groupedByTimestamp = regionData.reduce((acc, row) => {
+                    if (!acc[row.timestamp]) {
+                        acc[row.timestamp] = { timestamp: row.timestamp, actual: 0, predicted: 0, count: 0 };
+                    }
+                    acc[row.timestamp].actual += row.actual;
+                    acc[row.timestamp].predicted += row.predicted;
+                    acc[row.timestamp].count += 1;
+                    return acc;
+                }, {});
+                return Object.values(groupedByTimestamp)
+                    .map(item => ({
+                        timestamp: item.timestamp,
+                        actual: item.actual / item.count,
+                        predicted: item.predicted / item.count
+                    }))
+                    .sort((a, b) => a.timestamp - b.timestamp)
+                    .slice(0, 100); // Limiting to 100 points for performance
+            });
+
+            const highestMAE = aggregatedData.length > 0 ? aggregatedData.reduce((max, item) => Number(item.mae) > Number(max.mae) ? item : max, aggregatedData[0]) : { region: 'N/A', mae: 'N/A' };
+            
+            // Preparing data for training history chart (New logic)
+            let formattedHistoryData = [];
+            if (trainingHistoryData && trainingHistoryData.epochs) {
+                formattedHistoryData = trainingHistoryData.epochs.map((epoch, index) => ({
+                    epoch: epoch,
+                    trainingLoss: trainingHistoryData.loss[index],
+                    validationLoss: (trainingHistoryData.val_loss && trainingHistoryData.val_loss[index] !== undefined) ? trainingHistoryData.val_loss[index] : null
+                })).filter(d => d.trainingLoss !== undefined); 
+            }
+
+            // Rendering the report with summary, charts, and tables
+            return (
+                <div className="container mx-auto p-6">
+                    {/* Summary Section */}
+                    <div className="mb-12 text-center">
+                        <h1 className="text-4xl font-bold text-gray-800 mb-4">Demand Prediction Analysis Report</h1>
+                        <p className="text-lg text-gray-600">
+                            This report analyzes the performance of an LSTM-based demand prediction model, including training progress and prediction accuracy across regions.
+                        </p>
+                    </div>
+
+                    {/* Interesting Fact Section (conditionally rendered) */}
+                    {aggregatedData.length > 0 && (
+                        <div className="mb-12 p-6 bg-blue-100 rounded-lg">
+                            <h2 className="text-2xl font-semibold text-blue-800 mb-2">Prediction Highlight</h2>
+                            <p className="text-lg text-blue-700">
+                                Region {highestMAE.region} has the highest Mean Absolute Error (MAE) of {highestMAE.mae} kg, indicating larger prediction discrepancies.
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Bar Chart: Total Actual vs Predicted Demand by Region (conditionally rendered) */}
+                    {aggregatedData.length > 0 && (
+                        <div className="chart-container">
+                            <h2 className="text-2xl font-semibold text-gray-800 mb-4">Total Actual vs Predicted Demand by Region</h2>
+                            <Recharts.ResponsiveContainer width="100%" height={400}>
+                                <Recharts.BarChart data={aggregatedData}>
+                                    <Recharts.CartesianGrid strokeDasharray="3 3" />
+                                    <Recharts.XAxis dataKey="region" label={{ value: 'Region', position: 'insideBottom', offset: -10, fontSize: 12 }} />
+                                    <Recharts.YAxis label={{ value: 'Demand (kg)', angle: -90, position: 'insideLeft', fontSize: 12 }} />
+                                    <Recharts.Tooltip formatter={(value) => `${Math.round(value).toLocaleString()} kg`} />
+                                    <Recharts.Legend />
+                                    <Recharts.Bar dataKey="actualSum" name="Actual Demand" fill="#3B82F6" />
+                                    <Recharts.Bar dataKey="predictedSum" name="Predicted Demand" fill="#10B981" />
+                                </Recharts.BarChart>
+                            </Recharts.ResponsiveContainer>
+                        </div>
+                    )}
+
+                    {/* Line Chart: Time-Series Demand Trends by Region (conditionally rendered) */}
+                    {regions.map((region, index) => (
+                        timeSeriesData[index] && timeSeriesData[index].length > 0 && (
+                            <div key={region} className="chart-container">
+                                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Demand Trends for {region}</h2>
+                                <Recharts.ResponsiveContainer width="100%" height={400}>
+                                    <Recharts.LineChart data={timeSeriesData[index]}>
+                                        <Recharts.CartesianGrid strokeDasharray="3 3" />
+                                        <Recharts.XAxis dataKey="timestamp" label={{ value: 'Timestamp', position: 'insideBottom', offset: -10, fontSize: 12 }} />
+                                        <Recharts.YAxis label={{ value: 'Average Demand (kg)', angle: -90, position: 'insideLeft', fontSize: 12 }} />
+                                        <Recharts.Tooltip formatter={(value) => `${value.toFixed(2)} kg`} />
+                                        <Recharts.Legend />
+                                        <Recharts.Line type="monotone" dataKey="actual" name="Actual Demand" stroke="#3B82F6" strokeWidth={2} dot={false} />
+                                        <Recharts.Line type="monotone" dataKey="predicted" name="Predicted Demand" stroke="#10B981" strokeWidth={2} dot={false} />
+                                    </Recharts.LineChart>
+                                </Recharts.ResponsiveContainer>
+                            </div>
+                        )
+                    ))}
+
+                    {/* Table: Prediction Metrics by Region (conditionally rendered) */}
+                    {aggregatedData.length > 0 && (
+                        <div className="chart-container">
+                            <h2 className="text-2xl font-semibold text-gray-800 mb-4">Prediction Metrics by Region</h2>
+                            <div className="table-container">
+                                <table className="min-w-full bg-white rounded-lg shadow">
+                                    <thead>
+                                        <tr className="bg-gray-200">
+                                            <th className="py-2 px-4 text-left text-gray-700">Region</th>
+                                            <th className="py-2 px-4 text-left text-gray-700">Total Actual (kg)</th>
+                                            <th className="py-2 px-4 text-left text-gray-700">Total Predicted (kg)</th>
+                                            <th className="py-2 px-4 text-left text-gray-700">MAE (kg)</th>
+                                            <th className="py-2 px-4 text-left text-gray-700">RMSE (kg)</th>
+                                            <th className="py-2 px-4 text-left text-gray-700">Sample Count</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {aggregatedData.map(item => (
+                                            <tr key={item.region} className="border-t">
+                                                <td className="py-2 px-4 text-gray-600">{item.region}</td>
+                                                <td className="py-2 px-4 text-gray-600">{item.actualSum.toLocaleString()}</td>
+                                                <td className="py-2 px-4 text-gray-600">{item.predictedSum.toLocaleString()}</td>
+                                                <td className="py-2 px-4 text-gray-600">{item.mae}</td>
+                                                <td className="py-2 px-4 text-gray-600">{item.rmse}</td>
+                                                <td className="py-2 px-4 text-gray-600">{item.count}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Training History Chart (New Section) */}
+                    {formattedHistoryData.length > 0 && (
+                        <div className="chart-container">
+                            <h2 className="text-2xl font-semibold text-gray-800 mb-4">Model Training History</h2>
+                            <Recharts.ResponsiveContainer width="100%" height={400}>
+                                <Recharts.LineChart data={formattedHistoryData}>
+                                    <Recharts.CartesianGrid strokeDasharray="3 3" />
+                                    <Recharts.XAxis dataKey="epoch" label={{ value: 'Epoch', position: 'insideBottom', offset: -10, fontSize: 12 }} />
+                                    <Recharts.YAxis label={{ value: 'Loss', angle: -90, position: 'insideLeft', fontSize: 12 }} />
+                                    <Recharts.Tooltip formatter={(value) => value.toFixed(4)} />
+                                    <Recharts.Legend />
+                                    <Recharts.Line type="monotone" dataKey="trainingLoss" name="Training Loss" stroke="#8884d8" strokeWidth={2} dot={false} />
+                                    {formattedHistoryData.some(d => d.validationLoss !== null) && (
+                                        <Recharts.Line type="monotone" dataKey="validationLoss" name="Validation Loss" stroke="#82ca9d" strokeWidth={2} dot={false} />
+                                    )}
+                                </Recharts.LineChart>
+                            </Recharts.ResponsiveContainer>
+                        </div>
+                    )}
+
+                    {/* Conclusion Section */}
+                    <div className="mt-12 p-6 bg-gray-50 rounded-lg">
+                        <h2 className="text-2xl font-semibold text-gray-800 mb-2">Conclusion</h2>
+                        <p className="text-lg text-gray-600">
+                            The analysis reveals that Region_A exhibits significantly higher demand variability compared to Region_B, with occasional spikes in actual demand that the LSTM model struggles to predict accurately, leading to higher MAE and RMSE. 
+                            Region_B, primarily dealing with vegetables, shows more stable demand patterns, resulting in lower prediction errors. 
+                            The time-series trends indicate that the model captures general demand patterns but underperforms during sudden demand surges, possibly due to external factors like promotions or disasters. 
+                            Future improvements could involve incorporating more contextual features or using ensemble models to handle outliers better.
+                        </p>
+                    </div>
+                </div>
+            );
+        };
+
+        // Rendering the App component
+        root.render(<App />);
+    </script>
+</body>
+</html>
