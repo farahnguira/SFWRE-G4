@@ -5,25 +5,26 @@ from datetime import datetime, timedelta
 import os
 
 # Configuration
-num_items = 1000
+num_items = 10000  # Increased from 1000 to get more balanced representation
 base_date = datetime.today()
-categories = ["vegetables", "dairy", "canned", "bakery", "meat", "dry"]
+categories = ["vegetables", "dairy", "canned", "bakery", "meat", "dry goods"]  # Updated 'dry' to 'dry goods'
 category_codes = {cat: idx + 1 for idx, cat in enumerate(categories)}
 
 # Define realistic ranges per food type
 food_types = {
     "vegetables": {"temp": (2, 10), "humid": (80, 95), "shelf_base": (7, 60)},
     "dairy": {"temp": (0, 4), "humid": (70, 90), "shelf_base": (7, 30)},
-    "meat": {"temp": (0, 4), "humid": (75, 95), "shelf_base": (1, 14)},
-    "bakery": {"temp": (15, 20), "humid": (40, 60), "shelf_base": (1, 7)},
+    "meat": {"temp": (0, 4), "humid": (75, 95), "shelf_base": (3, 20)},  # Increased min from 1 to 3, max from 14 to 20
+    "bakery": {"temp": (15, 20), "humid": (40, 60), "shelf_base": (3, 10)},  # Increased min from 1 to 3, max from 7 to 10
     "canned": {"temp": (15, 20), "humid": (40, 60), "shelf_base": (180, 365)},
-    "dry": {"temp": (15, 25), "humid": (30, 50), "shelf_base": (100, 365)}
+    "dry goods": {"temp": (15, 25), "humid": (30, 50), "shelf_base": (100, 365)}
 }
 
 # Generate data
 data = []
 for _ in range(num_items):
-    food_type = random.choices(categories, weights=[30, 20, 15, 10, 5, 10])[0]
+    # More balanced weights: vegetables, dairy, canned, bakery, meat, dry goods
+    food_type = random.choices(categories, weights=[20, 15, 25, 15, 10, 15])[0] 
     params = food_types[food_type]
     
     # Temperature and humidity
@@ -60,3 +61,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 output_path = os.path.join(script_dir, "processed_data.csv")
 df.to_csv(output_path, index=False)
 print(f"✅ Generated {num_items} realistic records to: {output_path}")
+
+# Also save a copy as cleaned_data_large.csv for the model training
+cleaned_path = os.path.join(script_dir, "cleaned_data_large.csv")
+df.to_csv(cleaned_path, index=False)
+print(f"✅ Also saved data as: {cleaned_path}")

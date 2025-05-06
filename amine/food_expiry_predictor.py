@@ -9,11 +9,17 @@ import joblib
 # Construct path to the data file
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(script_dir, "data", "cleaned_data.csv")
+large_data_path = os.path.join(script_dir, "data", "cleaned_data_large.csv")
 
-# Load data
+# Try to load the larger dataset first, fall back to regular dataset if not available
 try:
-    df = pd.read_csv(data_path)
-    print(f"✅ Successfully loaded data from {data_path}")
+    if os.path.exists(large_data_path):
+        df = pd.read_csv(large_data_path)
+        print(f"✅ Successfully loaded larger dataset from {large_data_path}")
+    else:
+        df = pd.read_csv(data_path)
+        print(f"✅ Successfully loaded data from {data_path}")
+        print(f"⚠️ For better results, generate a larger dataset with gen_data.py (num_items=10000)")
 except FileNotFoundError:
     print(f"❌ Error: Could not find the data file at {data_path}")
     print("Please ensure 'cleaned_data.csv' exists in the 'data' subdirectory.")
@@ -21,6 +27,12 @@ except FileNotFoundError:
 except Exception as e:
     print(f"❌ An error occurred while loading the data: {e}")
     exit()
+
+# Print dataset statistics to verify balance
+print("\n--- Dataset Statistics ---")
+type_counts = df['type'].value_counts()
+print(f"Food type distribution:\n{type_counts}")
+print(f"Total samples: {len(df)}")
 
 # Features and target
 feature_cols = ['temperature', 'humidity', 'type']
@@ -41,8 +53,13 @@ y = df[target_col]
 # Train-test split with stratification
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=df['type'])
 
-# Train Random Forest model with tuned parameters
-model = RandomForestRegressor(n_estimators=200, max_depth=15, min_samples_split=5, random_state=42)
+# Train Random Forest model with improved parameters
+model = RandomForestRegressor(
+    n_estimators=200,  # Increased from default
+    max_depth=10,      # Added to prevent overfitting
+    min_samples_split=5,
+    random_state=42
+)
 model.fit(X_train, y_train)
 
 # Predictions (ensure non-negative)
@@ -58,6 +75,15 @@ print(f"R² Score: {r2:.2f}")
 print("\n--- Detailed Model Evaluation ---")
 print(f"Number of training samples: {X_train.shape[0]}")
 print(f"Number of test samples: {X_test.shape[0]}")
+
+# Food type specific MAE
+type_dummies = [col for col in X_test.columns if col.startswith('food_type_')]
+for food_type_col in type_dummies:
+    food_type = food_type_col.replace('food_type_', '')
+    mask = X_test[food_type_col] == 1
+    if mask.sum() > 0:
+        mae_type = mean_absolute_error(y_test[mask], y_pred[mask])
+        print(f"MAE for {food_type}: {mae_type:.2f} days")
 
 # Feature importance
 importance = pd.DataFrame({
@@ -82,7 +108,7 @@ samples = pd.DataFrame({
 
 # Minimum shelf life constraints
 min_shelf_life = {
-    'vegetables': 7, 'dairy': 7, 'canned': 180, 'bakery': 1, 'meat': 1, 'dry goods': 100
+    'vegetables': 7, 'dairy': 7, 'canned': 180, 'bakery': 3, 'meat': 3, 'dry goods': 100
 }
 
 # Prepare samples for prediction
@@ -93,8 +119,6 @@ for col in X.columns:
 X_samples[['temperature', 'humidity']] = samples[['temperature', 'humidity']]
 X_samples = X_samples[X.columns]  # Ensure same column order
 
-food_types = {1: 'vegetables', 2: 'dairy', 3: 'canned', 4: 'bakery', 5: 'meat', 6: 'dry goods'}
-
 for i, row in samples.iterrows():
     pred_days = model.predict(X_samples.iloc[[i]])[0]
     food_type = row['type']
@@ -104,4 +128,3 @@ for i, row in samples.iterrows():
     print(f"Food type: {food_type}, Temp: {row['temperature']}°C, Humidity: {row['humidity']}%")
     print(f"  → Predicted shelf life: {pred_days:.1f} days")
     print(f"  → Expected expiry date: {pred_date.strftime('%Y-%m-%d')}")
-    
