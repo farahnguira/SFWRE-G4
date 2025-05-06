@@ -7,6 +7,7 @@ import numpy as np
 from ui.dash_app.use_data import load_and_preprocess_data
 import os
 import pickle
+import json
 
 def build_model(window_size, n_features):
     model = Sequential([
@@ -67,6 +68,30 @@ def train_model(file_path, window_size=28, epochs=100, batch_size=32):
         pickle.dump(feature_scalers_dict, f)
     with open("models/target_scalers_dict.pkl", "wb") as f:
         pickle.dump(target_scalers_dict, f)
+
+    # Save training history
+    history_data_to_save = {
+        'loss': history.history.get('loss', []),
+        'val_loss': history.history.get('val_loss', [])
+    }
+    # Ensure epochs are included for the x-axis
+    # The number of epochs will be the length of the loss array
+    history_data_to_save['epochs'] = list(range(1, len(history_data_to_save['loss']) + 1))
+    
+    # If val_loss exists and is not empty, create epochs for it too
+    if history_data_to_save['val_loss']:
+         history_data_to_save['val_epochs'] = list(range(1, len(history_data_to_save['val_loss']) + 1))
+    else: # Handle case where there's no validation data or val_loss is empty
+        history_data_to_save['val_loss'] = [] # Ensure it's an empty list if not present
+        history_data_to_save['val_epochs'] = []
+
+    history_file_path = "models/training_history.json"
+    try:
+        with open(history_file_path, "w") as f:
+            json.dump(history_data_to_save, f)
+        print(f"Training history saved to {history_file_path}")
+    except Exception as e:
+        print(f"Error saving training history: {e}")
     
     print("Model training complete.")
     print("Model saved to models/lstm_demand_model.h5")
