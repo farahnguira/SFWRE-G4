@@ -2,6 +2,7 @@ import pandas as pd
 import random
 from datetime import datetime
 import argparse
+import os
 
 def clean_data(input_path, output_path, large_output_path=None):
     # 1. Load raw data, parsing dates
@@ -17,7 +18,7 @@ def clean_data(input_path, output_path, large_output_path=None):
     today = pd.Timestamp.today().normalize()
     assert (df["expiry_date"] >= today).all(), "Some expiry_date values are before today"
 
-    print("✅ Raw data loaded and validated.")
+    print("Raw data loaded and validated.")
     
     # 3. Type normalization
     synonym_map = {
@@ -53,7 +54,7 @@ def clean_data(input_path, output_path, large_output_path=None):
     assert pd.api.types.is_datetime64_any_dtype(df["expiry_date"])
     assert (df["expiry_date"] >= today).all(), "Some expiry_date values are before today"
 
-    print("✅ Data cleaned and re-validated.")
+    print("Data cleaned and re-validated.")
     
     # 6. Ensure columns are in desired order
     desired_order = [
@@ -64,14 +65,14 @@ def clean_data(input_path, output_path, large_output_path=None):
     
     # 7. Save cleaned dataset
     df.to_csv(output_path, index=False)
-    print(f"✅ Cleaned data saved to: {output_path}")
+    print(f"Cleaned data saved to: {output_path}")
     
     # 8. Optionally save a copy as cleaned_data_large.csv if requested
     if large_output_path:
         df.to_csv(large_output_path, index=False)
-        print(f"✅ Larger cleaned dataset saved to: {large_output_path}")
+        print(f" Larger cleaned dataset saved to: {large_output_path}")
     
-    print("✅ Data processing complete.")
+    print("Data processing complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Clean food data')
