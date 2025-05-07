@@ -119,6 +119,8 @@ for col in X.columns:
 X_samples[['temperature', 'humidity']] = samples[['temperature', 'humidity']]
 X_samples = X_samples[X.columns]  # Ensure same column order
 
+# Collect predictions for CSV
+predictions_data = []
 for i, row in samples.iterrows():
     pred_days = model.predict(X_samples.iloc[[i]])[0]
     food_type = row['type']
@@ -128,3 +130,17 @@ for i, row in samples.iterrows():
     print(f"Food type: {food_type}, Temp: {row['temperature']}°C, Humidity: {row['humidity']}%")
     print(f"  -> Predicted shelf life: {pred_days:.1f} days")
     print(f"  -> Expected expiry date: {pred_date.strftime('%Y-%m-%d')}")
+    
+    predictions_data.append({
+        'food_type': food_type,
+        'temperature': row['temperature'],
+        'humidity': row['humidity'],
+        'predicted_shelf_life_days': round(pred_days, 1),
+        'expected_expiry_date': pred_date.strftime('%Y-%m-%d')
+    })
+
+# Save predictions to CSV
+predictions_df = pd.DataFrame(predictions_data)
+output_path = os.path.join(script_dir, "data", "food_expiry_prediction.csv")
+predictions_df.to_csv(output_path, index=False)
+print(f"\nSample predictions saved to {output_path}")
