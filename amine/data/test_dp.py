@@ -23,7 +23,7 @@ def load_first_n_items(filename, n=5):
 
 if __name__ == "__main__":
     items = load_first_n_items("cleaned_data.csv", n=50)
-    capacity = 600  # Increased capacity to 600
+    capacity = 50  # Example capacity, adjust as needed
     print("Items loaded:")
 
     weights = [item["weight"] for item in items]

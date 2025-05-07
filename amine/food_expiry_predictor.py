@@ -15,17 +15,17 @@ large_data_path = os.path.join(script_dir, "data", "cleaned_data_large.csv")
 try:
     if os.path.exists(large_data_path):
         df = pd.read_csv(large_data_path)
-        print(f" Successfully loaded larger dataset from {large_data_path}")
+        print(f"✅ Successfully loaded larger dataset from {large_data_path}")
     else:
         df = pd.read_csv(data_path)
-        print(f" Successfully loaded data from {data_path}")
-        print(f" For better results, generate a larger dataset with gen_data.py (num_items=10000)")
+        print(f"✅ Successfully loaded data from {data_path}")
+        print(f"⚠️ For better results, generate a larger dataset with gen_data.py (num_items=10000)")
 except FileNotFoundError:
-    print(f"Error: Could not find the data file at {data_path}")
+    print(f"❌ Error: Could not find the data file at {data_path}")
     print("Please ensure 'cleaned_data.csv' exists in the 'data' subdirectory.")
     exit()
 except Exception as e:
-    print(f" An error occurred while loading the data: {e}")
+    print(f"❌ An error occurred while loading the data: {e}")
     exit()
 
 # Print dataset statistics to verify balance
@@ -39,10 +39,10 @@ feature_cols = ['temperature', 'humidity', 'type']
 target_col = 'shelf_life_days'
 
 if not all(col in df.columns for col in feature_cols):
-    print(f" Error: One or more feature columns {feature_cols} not found in the CSV.")
+    print(f"❌ Error: One or more feature columns {feature_cols} not found in the CSV.")
     exit()
 if target_col not in df.columns:
-    print(f" Error: Target column '{target_col}' not found in the CSV.")
+    print(f"❌ Error: Target column '{target_col}' not found in the CSV.")
     exit()
 
 # Prepare features: one-hot encode 'type'
@@ -96,7 +96,7 @@ print(importance.sort_values(by='Importance', ascending=False))
 # Save the model
 model_path = os.path.join(script_dir, "data", "expiry_predictor_model.joblib")
 joblib.dump(model, model_path)
-print(f"\n Model saved to {model_path}")
+print(f"\n✅ Model saved to {model_path}")
 
 # Sample predictions
 print("\n--- Sample Predictions ---")
@@ -119,8 +119,6 @@ for col in X.columns:
 X_samples[['temperature', 'humidity']] = samples[['temperature', 'humidity']]
 X_samples = X_samples[X.columns]  # Ensure same column order
 
-# Collect predictions for CSV
-predictions_data = []
 for i, row in samples.iterrows():
     pred_days = model.predict(X_samples.iloc[[i]])[0]
     food_type = row['type']
@@ -128,19 +126,5 @@ for i, row in samples.iterrows():
     pred_days = max(min_shelf_life.get(food_type, 1), pred_days)
     pred_date = pd.Timestamp.today() + pd.Timedelta(days=pred_days)
     print(f"Food type: {food_type}, Temp: {row['temperature']}°C, Humidity: {row['humidity']}%")
-    print(f"  -> Predicted shelf life: {pred_days:.1f} days")
-    print(f"  -> Expected expiry date: {pred_date.strftime('%Y-%m-%d')}")
-    
-    predictions_data.append({
-        'food_type': food_type,
-        'temperature': row['temperature'],
-        'humidity': row['humidity'],
-        'predicted_shelf_life_days': round(pred_days, 1),
-        'expected_expiry_date': pred_date.strftime('%Y-%m-%d')
-    })
-
-# Save predictions to CSV
-predictions_df = pd.DataFrame(predictions_data)
-output_path = os.path.join(script_dir, "data", "food_expiry_prediction.csv")
-predictions_df.to_csv(output_path, index=False)
-print(f"\nSample predictions saved to {output_path}")
+    print(f"  → Predicted shelf life: {pred_days:.1f} days")
+    print(f"  → Expected expiry date: {pred_date.strftime('%Y-%m-%d')}")

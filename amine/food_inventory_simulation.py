@@ -20,11 +20,11 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(script_dir, "data")
 sys.path.append(data_dir)
 
-# Import dp_knapsack and save_to_csv from dp_scheduler
-from dp_scheduler import dp_knapsack, save_to_csv
+# Import dp_knapsack from dp_scheduler
+from dp_scheduler import dp_knapsack
 
 # Simulation
-def run_simulation(data_path, model_path, timesteps=30, capacity=600, scenario="urban", output_dir="data/tarji"):
+def run_simulation(data_path, model_path, timesteps=30, capacity=100, scenario="urban", output_dir="data/outputs"):
     """
     Simulate food redistribution using DP scheduler for allocation.
     
@@ -42,16 +42,16 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=600, scenario="
     # Load data
     try:
         df = pd.read_csv(data_path)
-        print(f" Successfully loaded data from {data_path}")
+        print(f"✅ Successfully loaded data from {data_path}")
     except Exception as e:
-        print(f" Error loading data: {e}")
+        print(f"❌ Error loading data: {e}")
         exit()
     
     # Validate required columns
     required_cols = ["item_id", "type", "shelf_life_days", "quantity", "priority", "temperature", "humidity"]
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        print(f" Error: Missing required columns in CSV: {missing_cols}")
+        print(f"❌ Error: Missing required columns in CSV: {missing_cols}")
         exit()
     
     # Print dataset stats
@@ -63,9 +63,9 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=600, scenario="
     # Load Random Forest model
     try:
         model = joblib.load(model_path)
-        print(f" Successfully loaded model from {model_path}")
+        print(f"✅ Successfully loaded model from {model_path}")
     except Exception as e:
-        print(f"Error loading model: {e}")
+        print(f"❌ Error loading model: {e}")
         print("Using raw priority as fallback.")
         model = None
     
@@ -198,16 +198,6 @@ def run_simulation(data_path, model_path, timesteps=30, capacity=600, scenario="
             selected_items['day'] = day + 1
             allocated_items.append(selected_items[['day', 'item_id', 'type', 'quantity', 'adjusted_priority']])
             
-            # Call save_to_csv to generate summary file for this day
-            summary_df = save_to_csv(
-                inventory,
-                selected_idx,
-                output_dir=output_dir,
-                scenario=scenario,
-                capacity=capacity,
-                day=day + 1  # Pass the simulation day
-            )
-            
             # Remove processed items - use boolean mask approach to avoid index errors
             mask = np.ones(len(inventory), dtype=bool)
             mask[selected_idx] = False
@@ -295,10 +285,10 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(script_dir, "data", "cleaned_data.csv")
     model_path = os.path.join(script_dir, "data", "expiry_predictor_model.joblib")
-    output_dir = os.path.join(script_dir, "data", "tarji")  # Updated to data/tarji
+    output_dir = os.path.join(script_dir, "data", "outputs")
     
     # Run simulations for all capacities and scenarios
-    capacities = [50, 100, 200, 400, 600]
+    capacities = [50, 100, 200, 400, 600]  # Added higher capacity values (400, 600)
     scenarios = ["urban", "spike", "disaster"]
     results = []
     
